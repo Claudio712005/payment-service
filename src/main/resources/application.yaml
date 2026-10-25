@@ -2,39 +2,35 @@ spring:
   application:
     name: payment-service
   datasource:
-    url: ${ST_PAY_DB_URL}
-    username: ${ST_PAY_DB_USER}
-    password: ${ST_PAY_DB_PASSWORD}
+    url: ${PAYMENT_DB_URL:jdbc:oracle:thin:@//localhost:1521/FREEPDB1}
+    username: ${PAYMENT_DB_USER:PAY}
+    password: ${PAYMENT_DB_PASSWORD:pay_local}
     hikari:
-      pool-name: st-pay-pool
-      maximum-pool-size: ${ST_PAY_DB_POOL_MAX:10}
-      minimum-idle: ${ST_PAY_DB_POOL_MIN:2}
+      pool-name: payment-pool
+      maximum-pool-size: ${PAYMENT_DB_POOL_MAX:10}
+      minimum-idle: ${PAYMENT_DB_POOL_MIN:2}
       connection-timeout: 3000
       validation-timeout: 2000
   flyway:
-    enabled: true
-    locations: classpath:db/migration
-    schemas: ${ST_PAY_DB_SCHEMA:PAY}
-    default-schema: ${ST_PAY_DB_SCHEMA:PAY}
-    create-schemas: false
-    baseline-on-migrate: false
-    validate-on-migrate: true
-    out-of-order: false
+    enabled: false
   jpa:
     open-in-view: false
     hibernate:
       ddl-auto: validate
     properties:
       hibernate:
-        default_schema: ${ST_PAY_DB_SCHEMA:PAY}
+        default_schema: ${PAYMENT_DB_SCHEMA:PAY}
         jdbc:
           time_zone: UTC
   data:
     mongodb:
-      uri: ${MONGODB_URI}
-      username: ${MONGODB_USERNAME}
-      password: ${MONGODB_PASSWORD}
+      uri: ${MONGODB_URI:mongodb://localhost:27017/payment}
+      username: ${MONGODB_USERNAME:}
+      password: ${MONGODB_PASSWORD:}
       auto-index-creation: true
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
   threads:
     virtual:
       enabled: true
@@ -54,44 +50,55 @@ management:
   health:
     db:
       enabled: true
-  tracing:
-    sampling:
-      probability: ${ST_PAY_TRACE_SAMPLING:1.0}
-  otlp:
-    tracing:
-      export:
-        enabled: ${ST_PAY_OTLP_ENABLED:false}
-    metrics:
-      export:
-        enabled: ${ST_PAY_OTLP_ENABLED:false}
 
 springdoc:
   swagger-ui:
     path: /swagger-ui.html
 
 logging:
-  structured:
-    format:
-      console: ${ST_PAY_LOG_FORMAT:logstash}
-  pattern:
-    correlation: "[${spring.application.name:payment-service},%X{traceId:-},%X{spanId:-},%X{correlationId:-},%X{requestId:-}] "
+  level:
+    com.clau.payment_service: ${PAYMENT_LOG_LEVEL:INFO}
 
 ---
 spring:
   config:
     activate:
-      on-profile: dev
+      on-profile: migration
+  main:
+    web-application-type: none
+    banner-mode: "off"
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+    schemas: ${PAYMENT_DB_SCHEMA:PAY}
+    default-schema: ${PAYMENT_DB_SCHEMA:PAY}
+    create-schemas: false
+    baseline-on-migrate: false
+    validate-on-migrate: true
+    clean-disabled: true
+    out-of-order: false
+    connect-retries: 20
+    connect-retries-interval: 10
   datasource:
-    url: ${ST_PAY_DB_URL:jdbc:oracle:thin:@//localhost:1521/FREEPDB1}
-    username: ${ST_PAY_DB_USER:PAY}
-    password: ${ST_PAY_DB_PASSWORD:pay_local}
+    hikari:
+      pool-name: payment-migracao
+      maximum-pool-size: 1
+      minimum-idle: 0
+      initialization-fail-timeout: -1
+  jpa:
+    hibernate:
+      ddl-auto: none
   data:
     mongodb:
-      uri: ${MONGODB_URI:mongodb://localhost:27017/st_pay}
-      username: ${MONGODB_USERNAME:}
-      password: ${MONGODB_PASSWORD:}
+      auto-index-creation: false
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: "health"
 
 logging:
   level:
-    com.clau.payment_service: DEBUG
     org.flywaydb: INFO
+    org.hibernate: WARN
