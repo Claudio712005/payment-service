@@ -2,7 +2,7 @@
 
 Log estruturado em JSON, rastreável pelos quatro identificadores, com mascaramento declarado
 por anotação no campo. Configuração em `src/main/resources/logback-spring.xml` e no pacote
-`observability`.
+`observability`. Os perfis da aplicacao estao em [perfis.md](perfis.md).
 
 ## Envelope JSON
 
