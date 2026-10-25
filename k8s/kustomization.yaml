@@ -1,0 +1,38 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: payment-service
+
+resources:
+  - namespace.yaml
+  - migracao-job.yaml
+  - deployment.yaml
+  - service.yaml
+  - scaledobject.yaml
+
+images:
+  - name: payment-service
+    newTag: latest
+
+generatorOptions:
+  disableNameSuffixHash: true
+
+configMapGenerator:
+  - name: payment-service-config
+    literals:
+      - PAYMENT_DB_URL=jdbc:oracle:thin:@//host.docker.internal:1521/FREEPDB1
+      - PAYMENT_DB_SCHEMA=PAY
+      - PAYMENT_DB_POOL_MAX=5
+      - PAYMENT_DB_POOL_MIN=1
+      - PAYMENT_LOG_LEVEL=DEBUG
+      - MONGODB_URI=mongodb://host.docker.internal:27017/payment
+      - REDIS_HOST=host.docker.internal
+      - REDIS_PORT=6379
+
+secretGenerator:
+  - name: payment-service-credenciais
+    literals:
+      - PAYMENT_DB_USER=PAY
+      - PAYMENT_DB_PASSWORD=pay_local
+      - MONGODB_USERNAME=
+      - MONGODB_PASSWORD=

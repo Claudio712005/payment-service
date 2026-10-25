@@ -1,0 +1,36 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: payment-service-migracao
+  labels:
+    app: payment-service
+    componente: migracao
+spec:
+  backoffLimit: 6
+  activeDeadlineSeconds: 1800
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        app: payment-service
+        componente: migracao
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: migracao
+          image: payment-service:latest
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: SPRING_PROFILES_ACTIVE
+              value: migration
+          envFrom:
+            - configMapRef:
+                name: payment-service-config
+            - secretRef:
+                name: payment-service-credenciais
+          resources:
+            requests:
+              cpu: 100m
+              memory: 320Mi
+            limits:
+              memory: 512Mi
