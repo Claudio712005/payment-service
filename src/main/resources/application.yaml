@@ -35,6 +35,61 @@ spring:
     virtual:
       enabled: true
 
+resilience:
+  bulkheads:
+    payment-provider:
+      max-concurrent-calls: ${PAYMENT_PROVIDER_BULKHEAD:16}
+      max-wait: 50ms
+    invoice-authority:
+      max-concurrent-calls: ${INVOICE_AUTHORITY_BULKHEAD:6}
+      max-wait: 0ms
+  circuit-breakers:
+    charge-create:
+      sliding-window: COUNT_BASED
+      sliding-window-size: 20
+      minimum-number-of-calls: 10
+      failure-rate-threshold: 50
+      wait-in-open-state: 30s
+      slow-call-duration: 15s
+    charge-query:
+      sliding-window: TIME_BASED
+      sliding-window-size: 60
+      minimum-number-of-calls: 20
+      failure-rate-threshold: 60
+      wait-in-open-state: 15s
+    invoice-issue:
+      sliding-window: COUNT_BASED
+      sliding-window-size: 10
+      minimum-number-of-calls: 5
+      failure-rate-threshold: 50
+      wait-in-open-state: 60s
+      slow-call-duration: 30s
+  retries:
+    charge-query:
+      max-attempts: 4
+      initial-backoff: 200ms
+      multiplier: 2.0
+      max-backoff: 2s
+      jitter: 0.3
+    charge-refund:
+      max-attempts: 3
+      initial-backoff: 500ms
+      multiplier: 2.0
+      max-backoff: 4s
+      jitter: 0.3
+    charge-cancel:
+      max-attempts: 3
+      initial-backoff: 500ms
+      multiplier: 2.0
+      max-backoff: 4s
+      jitter: 0.3
+    invoice-query:
+      max-attempts: 5
+      initial-backoff: 1s
+      multiplier: 2.0
+      max-backoff: 20s
+      jitter: 0.5
+
 server:
   shutdown: graceful
 
