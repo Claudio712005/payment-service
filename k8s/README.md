@@ -46,11 +46,20 @@ Se o banco estiver em container Docker na mesma máquina, publicar a porta no ho
 
 ## Migração do banco
 
-As migrations **não rodam na subida da aplicação**. `spring.flyway.enabled` é `false` no
-documento padrão do `application.yaml` e só liga no perfil `migration`.
+**Migrations são responsabilidade deste Job, não da aplicação.** `spring.flyway.enabled` é
+`false` em `application.yaml` e só liga em `application-migration.yaml`.
 
-O Job `payment-service-migracao` usa **a mesma imagem** da aplicação com
-`SPRING_PROFILES_ACTIVE=migration`. Nesse perfil o Boot sobe sem servidor web
+| Recurso | `SPRING_PROFILES_ACTIVE` | Migra? |
+|---|---|---|
+| `deployment.yaml` | `local` | não, valida com `ddl-auto: validate` |
+| `migracao-job.yaml` | `migration` | sim, e encerra |
+
+A regra não é só convenção: `MigrationProfileGuard` recusa a subida se o Flyway estiver ligado
+fora do perfil `migration`, se o perfil `migration` subir com o Flyway desligado — um Job que
+sai `0` sem migrar é pior que um Job que quebra — ou se os dois perfis estiverem ativos juntos.
+Detalhe em [docs/perfis.md](../docs/perfis.md).
+
+O Job usa **a mesma imagem** da aplicação. No perfil `migration` o Boot sobe sem servidor web
 (`spring.main.web-application-type=none`), o Flyway migra durante o refresh do contexto e o
 processo encerra: saída `0` em sucesso, diferente de `0` em falha — que é o que o Job lê.
 
