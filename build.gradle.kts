@@ -29,6 +29,7 @@ dependencies {
     implementation("org.flywaydb:flyway-database-oracle")
     implementation("org.springframework.boot:spring-boot-starter-opentelemetry")
     implementation("org.springframework.boot:spring-boot-starter-webmvc")
+    implementation("org.springframework.boot:spring-boot-starter-validation")
     implementation("org.jetbrains.kotlin:kotlin-reflect")
     implementation("org.springdoc:springdoc-openapi-starter-webmvc-ui:3.1.0")
     implementation("io.github.resilience4j:resilience4j-circuitbreaker:2.3.0")
