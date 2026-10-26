@@ -19,15 +19,8 @@ generatorOptions:
 
 configMapGenerator:
   - name: payment-service-config
-    literals:
-      - PAYMENT_DB_URL=jdbc:oracle:thin:@//host.docker.internal:1521/FREEPDB1
-      - PAYMENT_DB_SCHEMA=PAY
-      - PAYMENT_DB_POOL_MAX=5
-      - PAYMENT_DB_POOL_MIN=1
-      - PAYMENT_LOG_LEVEL=DEBUG
-      - MONGODB_URI=mongodb://host.docker.internal:27017/payment
-      - REDIS_HOST=host.docker.internal
-      - REDIS_PORT=6379
+    envs:
+      - payment-service.env
 
 secretGenerator:
   - name: payment-service-credenciais
