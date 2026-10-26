@@ -163,6 +163,11 @@ Transição de estado do circuito gera log em `WARN` com o nome da operação e 
 
 ## Propriedades
 
+Nenhum valor é literal no `application.yaml`: todos são `${VARIAVEL:default}`, e as variáveis
+estão em `k8s/payment-service.env`. Ajustar limiar de circuito ou tentativa de retry é editar o
+ConfigMap e reiniciar, sem reconstruir imagem. Os nomes seguem
+`PAYMENT_CB_<OPERACAO>_<AJUSTE>` e `PAYMENT_RETRY_<OPERACAO>_<AJUSTE>`.
+
 | Prefixo | Chave | Conteúdo |
 |---|---|---|
 | `resilience.bulkheads` | `ResilienceDomain` em kebab-case | `max-concurrent-calls`, `max-wait` |

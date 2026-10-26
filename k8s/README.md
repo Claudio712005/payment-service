@@ -115,22 +115,31 @@ há Prometheus no cluster local.
 
 ## Configuração
 
-`configMapGenerator` monta `payment-service-config`; `secretGenerator` monta
-`payment-service-credenciais`. As credenciais são locais e descartáveis.
+`application.yaml` é inteiramente preenchido por variáveis: toda propriedade é
+`${VARIAVEL:default}`. A única exceção é `spring.flyway.enabled: false`, fixa de propósito —
+migrations são do Job, e virar variável convidaria a devolver isso para a aplicação.
 
-| Variável | Onde | Default no `application.yaml` |
-|---|---|---|
-| `PAYMENT_DB_URL` | ConfigMap | `jdbc:oracle:thin:@//localhost:1521/FREEPDB1` |
-| `PAYMENT_DB_SCHEMA` | ConfigMap | `PAY` |
-| `PAYMENT_DB_POOL_MAX` / `_MIN` | ConfigMap | `10` / `2` |
-| `PAYMENT_LOG_LEVEL` | ConfigMap | `INFO` |
-| `MONGODB_URI` | ConfigMap | `mongodb://localhost:27017/payment` |
-| `REDIS_HOST` / `REDIS_PORT` | ConfigMap | `localhost` / `6379` |
-| `PAYMENT_DB_USER` / `PAYMENT_DB_PASSWORD` | Secret | `PAY` / `pay_local` |
-| `MONGODB_USERNAME` / `MONGODB_PASSWORD` | Secret | vazios |
+As 60 variáveis vivem em [`payment-service.env`](payment-service.env), que o
+`configMapGenerator` consome por `envs:`. Esse arquivo é a configuração efetiva legível:
+`kubectl get cm payment-service-config -o yaml` mostra tudo que está valendo, sem abrir o jar.
 
-Os defaults apontam para `localhost`, então `./gradlew bootRun` funciona direto contra os
-bancos externos, sem perfil nenhum.
+Quatro credenciais ficam fora dele, no `secretGenerator`:
+
+| Variável | Origem |
+|---|---|
+| `PAYMENT_DB_USER`, `PAYMENT_DB_PASSWORD` | Secret `payment-service-credenciais` |
+| `MONGODB_USERNAME`, `MONGODB_PASSWORD` | idem |
+
+Grupos no `.env`: aplicação, banco relacional, MongoDB e Redis, bulkhead por domínio, circuito
+por operação, retry por operação.
+
+`ConfigMapCoverageTest` falha se uma variável das properties não tiver entrada no ConfigMap nem
+no Secret, se o ConfigMap carregar chave que ninguém lê, ou se uma credencial aparecer no
+ConfigMap. Variável nova sem entrada cairia no default em silêncio — o teste existe para que
+isso não passe.
+
+Os defaults no `application.yaml` apontam para `localhost`, então `./gradlew bootRun` funciona
+direto contra os bancos externos, sem perfil e sem nenhuma variável exportada.
 
 ## Verificar
 

@@ -4,7 +4,7 @@ Dois perfis, um arquivo cada, sem documento multi-perfil no mesmo YAML.
 
 | Arquivo | Quem ativa | Para quê |
 |---|---|---|
-| `application.yaml` | sempre | o que é comum: nome, conexões, resiliência, nível de log |
+| `application.yaml` | sempre | o que é comum: nome, conexões, resiliência, nível de log — **inteiramente por variável** |
 | `application-local.yaml` | a **aplicação** | servir HTTP: pool, `ddl-auto: validate`, actuator, swagger |
 | `application-migration.yaml` | o **Job do Kubernetes** | migrar o schema e encerrar |
 
@@ -15,6 +15,11 @@ tem que ser pedido.
 ## Migrations são do Job, não da aplicação
 
 `spring.flyway.enabled` é `false` em `application.yaml`. Só `application-migration.yaml` liga.
+
+É o **único** valor fixo num arquivo em que todo o resto é `${VARIAVEL:default}`. Virar variável
+convidaria a devolver a migração para a aplicação por variável de ambiente, e é justamente isso
+que a separação evita. `ConfigurationVariablesTest` fixa que exportar
+`PAYMENT_FLYWAY_ENABLED=true` não muda nada.
 
 A aplicação sobe com `ddl-auto: validate`. Schema não migrado → o pod falha no startup em vez
 de atender com schema errado. Ela nunca migra, nem como fallback.
