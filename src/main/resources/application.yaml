@@ -87,6 +87,10 @@ resilience:
       max-backoff: ${PAYMENT_RETRY_INVOICE_QUERY_MAX:20s}
       jitter: ${PAYMENT_RETRY_INVOICE_QUERY_JITTER:0.5}
 
+springdoc:
+  cache:
+    disabled: ${PAYMENT_OPENAPI_CACHE_DISABLED:true}
+
 logging:
   level:
     com.clau.payment_service: ${PAYMENT_LOG_LEVEL:INFO}
