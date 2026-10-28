@@ -22,8 +22,31 @@ spring:
       username: ${MONGODB_USERNAME:}
       password: ${MONGODB_PASSWORD:}
     redis:
+      client-type: jedis
       host: ${REDIS_HOST:localhost}
       port: ${REDIS_PORT:6379}
+      database: ${REDIS_DATABASE:0}
+      username: ${REDIS_USERNAME:}
+      password: ${REDIS_PASSWORD:}
+      client-name: ${PAYMENT_APP_NAME:payment-service}
+      connect-timeout: ${REDIS_CONNECT_TIMEOUT:200ms}
+      timeout: ${REDIS_TIMEOUT:300ms}
+      jedis:
+        pool:
+          enabled: true
+          max-active: ${REDIS_POOL_MAX_ACTIVE:16}
+          max-idle: ${REDIS_POOL_MAX_IDLE:8}
+          min-idle: ${REDIS_POOL_MIN_IDLE:0}
+          max-wait: ${REDIS_POOL_MAX_WAIT:100ms}
+
+cache:
+  enabled: ${PAYMENT_CACHE_ENABLED:true}
+  key-prefix: ${PAYMENT_CACHE_KEY_PREFIX:payment}
+  default-ttl: ${PAYMENT_CACHE_DEFAULT_TTL:10m}
+  cache-null-values: ${PAYMENT_CACHE_NULL_VALUES:true}
+  circuit:
+    failure-threshold: ${PAYMENT_CACHE_CIRCUIT_FAILURES:3}
+    cooldown: ${PAYMENT_CACHE_CIRCUIT_COOLDOWN:30s}
 
 resilience:
   bulkheads:

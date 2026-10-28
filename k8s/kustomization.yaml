@@ -29,3 +29,5 @@ secretGenerator:
       - PAYMENT_DB_PASSWORD=pay_local
       - MONGODB_USERNAME=
       - MONGODB_PASSWORD=
+      - REDIS_USERNAME=
+      - REDIS_PASSWORD=

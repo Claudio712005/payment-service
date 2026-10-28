@@ -60,7 +60,9 @@ class ConfigMapCoverageTest {
             "PAYMENT_DB_USER",
             "PAYMENT_DB_PASSWORD",
             "MONGODB_USERNAME",
-            "MONGODB_PASSWORD"
+            "MONGODB_PASSWORD",
+            "REDIS_USERNAME",
+            "REDIS_PASSWORD"
         )
     }
 }

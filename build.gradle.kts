@@ -24,7 +24,10 @@ dependencies {
     implementation("org.springframework.boot:spring-boot-starter-actuator")
     implementation("org.springframework.boot:spring-boot-starter-data-jpa")
     implementation("org.springframework.boot:spring-boot-starter-data-mongodb")
-    implementation("org.springframework.boot:spring-boot-starter-data-redis")
+    implementation("org.springframework.boot:spring-boot-starter-data-redis") {
+        exclude(group = "io.lettuce", module = "lettuce-core")
+    }
+    implementation("redis.clients:jedis")
     implementation("org.flywaydb:flyway-core")
     implementation("org.flywaydb:flyway-database-oracle")
     implementation("org.springframework.boot:spring-boot-starter-opentelemetry")

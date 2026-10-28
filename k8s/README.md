@@ -119,19 +119,20 @@ há Prometheus no cluster local.
 `${VARIAVEL:default}`. A única exceção é `spring.flyway.enabled: false`, fixa de propósito —
 migrations são do Job, e virar variável convidaria a devolver isso para a aplicação.
 
-As 60 variáveis vivem em [`payment-service.env`](payment-service.env), que o
+As 75 variáveis vivem em [`payment-service.env`](payment-service.env), que o
 `configMapGenerator` consome por `envs:`. Esse arquivo é a configuração efetiva legível:
 `kubectl get cm payment-service-config -o yaml` mostra tudo que está valendo, sem abrir o jar.
 
-Quatro credenciais ficam fora dele, no `secretGenerator`:
+Seis credenciais ficam fora dele, no `secretGenerator`:
 
 | Variável | Origem |
 |---|---|
 | `PAYMENT_DB_USER`, `PAYMENT_DB_PASSWORD` | Secret `payment-service-credenciais` |
 | `MONGODB_USERNAME`, `MONGODB_PASSWORD` | idem |
+| `REDIS_USERNAME`, `REDIS_PASSWORD` | idem — vazias no Redis local, preenchidas onde há ACL |
 
-Grupos no `.env`: aplicação, banco relacional, MongoDB e Redis, bulkhead por domínio, circuito
-por operação, retry por operação.
+Grupos no `.env`: aplicação, banco relacional, MongoDB e Redis, cache, bulkhead por domínio,
+circuito por operação, retry por operação.
 
 `ConfigMapCoverageTest` falha se uma variável das properties não tiver entrada no ConfigMap nem
 no Secret, se o ConfigMap carregar chave que ninguém lê, ou se uma credencial aparecer no
