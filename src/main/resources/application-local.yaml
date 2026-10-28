@@ -31,6 +31,8 @@ management:
   health:
     db:
       enabled: true
+    redis:
+      enabled: ${PAYMENT_REDIS_HEALTH_ENABLED:false}
 
 springdoc:
   swagger-ui:
