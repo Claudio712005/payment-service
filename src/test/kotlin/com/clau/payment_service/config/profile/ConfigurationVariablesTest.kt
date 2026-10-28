@@ -1,5 +1,6 @@
 package com.clau.payment_service.config.profile
 
+import com.clau.payment_service.cache.CacheProperties
 import com.clau.payment_service.resilience.HttpFailureClass
 import com.clau.payment_service.resilience.ResilienceDomain
 import com.clau.payment_service.resilience.ResilienceOperation
@@ -31,6 +32,9 @@ class ConfigurationVariablesTest {
     private fun resiliencia(ambiente: ConfigurableEnvironment): ResilienceProperties =
         Binder.get(ambiente).bind("resilience", Bindable.of(ResilienceProperties::class.java)).get()
 
+    private fun cache(ambiente: ConfigurableEnvironment): CacheProperties =
+        Binder.get(ambiente).bind("cache", Bindable.of(CacheProperties::class.java)).get()
+
     @Test
     fun `nenhuma variavel do arquivo padrao fica sem resolver`() {
         val ambiente = ambiente()
@@ -46,6 +50,16 @@ class ConfigurationVariablesTest {
             "spring.data.mongodb.uri",
             "spring.data.redis.host",
             "spring.data.redis.port",
+            "spring.data.redis.database",
+            "spring.data.redis.connect-timeout",
+            "spring.data.redis.timeout",
+            "spring.data.redis.jedis.pool.max-active",
+            "spring.data.redis.jedis.pool.max-wait",
+            "cache.enabled",
+            "cache.key-prefix",
+            "cache.default-ttl",
+            "cache.circuit.failure-threshold",
+            "cache.circuit.cooldown",
             "resilience.bulkheads.payment-provider.max-concurrent-calls",
             "resilience.circuit-breakers.invoice-issue.wait-in-open-state",
             "resilience.retries.invoice-query.jitter",
@@ -128,6 +142,48 @@ class ConfigurationVariablesTest {
         assertEquals("jdbc:oracle:thin:@//banco:1521/PROD", ambiente.getProperty("spring.datasource.url"))
         assertEquals("mongodb://documentos:27017/pagamentos", ambiente.getProperty("spring.data.mongodb.uri"))
         assertEquals("cache", ambiente.getProperty("spring.data.redis.host"))
+    }
+
+    @Test
+    fun `padroes do cache chegam tipados nas properties`() {
+        val properties = cache(ambiente())
+
+        assertTrue(properties.enabled)
+        assertEquals("payment", properties.keyPrefix)
+        assertEquals(Duration.ofMinutes(10), properties.defaultTtl)
+        assertEquals(3, properties.circuit.failureThreshold)
+        assertEquals(Duration.ofSeconds(30), properties.circuit.cooldown)
+    }
+
+    @Test
+    fun `variavel de ambiente desliga o cache e muda a pausa do circuito`() {
+        val properties = cache(
+            ambiente(
+                mapOf(
+                    "PAYMENT_CACHE_ENABLED" to "false",
+                    "PAYMENT_CACHE_DEFAULT_TTL" to "45s",
+                    "PAYMENT_CACHE_CIRCUIT_FAILURES" to "7",
+                    "PAYMENT_CACHE_CIRCUIT_COOLDOWN" to "2m"
+                )
+            )
+        )
+
+        assertFalse(properties.enabled)
+        assertEquals(Duration.ofSeconds(45), properties.defaultTtl)
+        assertEquals(7, properties.circuit.failureThreshold)
+        assertEquals(Duration.ofMinutes(2), properties.circuit.cooldown)
+    }
+
+    @Test
+    fun `jedis e o cliente de redis declarado no arquivo padrao`() {
+        assertEquals("jedis", ambiente().getProperty("spring.data.redis.client-type"))
+    }
+
+    @Test
+    fun `saude do redis fica fora das sondas do perfil local`() {
+        val ambiente = ambiente(mapOf("spring.profiles.active" to "local"))
+
+        assertEquals("false", ambiente.getProperty("management.health.redis.enabled"))
     }
 
     @Test
