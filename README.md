@@ -23,7 +23,8 @@ MongoDB e Redis são externos — precisam estar no ar, exceto o Redis, que é o
 
 | Documento | Assunto |
 |---|---|
-| [docs/api.md](docs/api.md) | contratos, i18n, validação e formato de erro |
+| [docs/contratos.md](docs/contratos.md) | contract first: OpenAPI e AsyncAPI como fonte de verdade |
+| [docs/api.md](docs/api.md) | i18n, composição de fragmentos, validação e formato de erro |
 | [docs/cache.md](docs/cache.md) | cache em Redis por Jedis, e por que ele não derruba a aplicação |
 | [docs/resiliencia.md](docs/resiliencia.md) | bulkhead, circuit breaker e retry por operação |
 | [docs/observabilidade.md](docs/observabilidade.md) | log estruturado, correlação e mascaramento |
@@ -37,6 +38,9 @@ MongoDB e Redis são externos — precisam estar no ar, exceto o Redis, que é o
 
 **Toda propriedade é variável de ambiente.** `k8s/payment-service.env` é a configuração efetiva;
 `ConfigMapCoverageTest` falha se uma variável nova não tiver origem declarada.
+
+**O contrato vem antes do código.** `apis/payment-service.openapi.yaml` é a fonte de verdade da
+API REST; as interfaces de controller são geradas dele e o código não compila se divergir.
 
 **Redis é otimização.** Indisponível, cada operação de cache degrada para o caminho sem cache —
 a aplicação sobe, responde e não perde requisição.

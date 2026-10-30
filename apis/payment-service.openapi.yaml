@@ -1,0 +1,1391 @@
+openapi: 3.0.3
+
+info:
+  title: API de pagamentos
+  version: 1.0.0
+  description: |
+    Cria e consulta cobranças de uma ordem de serviço junto ao Mercado Pago.
+
+    **Este arquivo é a fonte de verdade do contrato.** As interfaces de controller são geradas
+    a partir dele (`./gradlew openApiGenerate`), e o código não compila contra um contrato que
+    não existe mais. O documento servido em `/v3/api-docs` é a mesma API traduzida em tempo de
+    requisição; divergência de forma entre os dois é defeito.
+
+    ## Idempotência
+
+    `POST /v1/pagamentos` exige o cabeçalho `Idempotency-Key`. A chave é persistida com unicidade
+    no banco, e o comportamento é:
+
+    | Situação | Resposta |
+    |---|---|
+    | chave nova | `201 Created` com o pagamento criado e `Location` |
+    | chave repetida, corpo idêntico | `200 OK` com o mesmo pagamento, sem nova cobrança no provedor |
+    | chave repetida, corpo diferente | `409 Conflict` — a chave já responde por outro pedido |
+
+    Retentativa de rede nunca cobra duas vezes. Quem chama deve gerar a chave uma vez por
+    intenção de cobrança, não por tentativa de envio.
+
+    ## Dados de cartão
+
+    Para `CARTAO_CREDITO` e `CARTAO_DEBITO` a API recebe o cartão em claro: número, validade e
+    código de segurança. **Isso coloca este serviço no escopo PCI-DSS integral.** Em consequência:
+
+    - os campos de cartão são `writeOnly` — nenhuma resposta os devolve, em nenhuma situação;
+    - o código de segurança não é persistido em lugar nenhum, nem em log, nem no Mongo de payloads;
+    - o número do cartão só aparece mascarado (`bandeira` e autorização) nas respostas;
+    - a API só aceita tráfego sobre TLS.
+
+    Quem puder tokenizar no SDK do provedor deve fazê-lo e trafegar o token — este contrato aceita
+    o cartão em claro porque o fluxo atual exige, não porque seja preferível.
+
+    ## Erros
+
+    Toda resposta de erro usa `application/problem+json`, no formato RFC 9457, com `type` apontando
+    para a classe do problema em `https://payment-service/erros/{classe}`. Erro de validação traz a
+    lista `violacoes`, campo a campo. `correlationId` repete o cabeçalho `X-Correlation-Id` da
+    requisição e é o que se leva para a investigação.
+
+    ## Idiomas
+
+    Título, descrição e mensagens respondem ao `Accept-Language` em `pt-BR` (padrão), `en` e `es`.
+    Idioma não suportado cai no padrão em vez de falhar.
+  contact:
+    name: payment-service
+  license:
+    name: Proprietário
+
+servers:
+  - url: http://localhost:8080
+    description: Execução local (`./gradlew bootRun`)
+  - url: http://payment-service.payment-service.svc.cluster.local:8080
+    description: Dentro do cluster, pelo DNS do serviço
+
+security:
+  - bearerAuth: []
+
+tags:
+  - name: pagamentos
+    description: |
+      Cobrança de uma ordem de serviço. O ciclo de vida da cobrança é observável por
+      `situacao`, e cada transição publica um evento — ver `payment-service.asyncapi.yaml`.
+
+paths:
+
+  /v1/pagamentos:
+
+    post:
+      tags: [pagamentos]
+      operationId: solicitarCobranca
+      x-codegen-request-body-name: solicitarCobranca
+      summary: Solicita a cobrança de uma ordem de serviço
+      description: |
+        Cria a cobrança no provedor e devolve a instrução de pagamento correspondente ao meio
+        escolhido: código copia e cola no Pix, linha digitável no boleto, autorização no cartão.
+
+        A cobrança nasce `PENDENTE`. Pix e boleto só mudam de situação quando o provedor confirma;
+        cartão pode voltar já `AUTORIZADO` ou `RECUSADO` na mesma resposta.
+
+        Parcelamento acima de uma parcela exige `CARTAO_CREDITO` — qualquer outro meio com
+        `parcelas > 1` é recusado com `400`, pela mesma validação que recusa um CPF inválido.
+
+        Escopo exigido no token: `pagamentos:escrever`.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - $ref: '#/components/parameters/AcceptLanguage'
+        - $ref: '#/components/parameters/CorrelationId'
+        - $ref: '#/components/parameters/RequestId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SolicitarCobranca'
+            examples:
+              pix:
+                $ref: '#/components/examples/SolicitacaoPix'
+              boleto:
+                $ref: '#/components/examples/SolicitacaoBoleto'
+              cartaoParcelado:
+                $ref: '#/components/examples/SolicitacaoCartaoParcelado'
+      responses:
+        '201':
+          description: Cobrança criada no provedor.
+          headers:
+            Location:
+              description: Endereço do pagamento criado.
+              schema:
+                type: string
+                format: uri-reference
+                example: /v1/pagamentos/9f1c2d64-0b3e-4a51-9c77-1d2e3f4a5b6c
+            X-Correlation-Id:
+              $ref: '#/components/headers/CorrelationId'
+            X-Request-Id:
+              $ref: '#/components/headers/RequestId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Pagamento'
+              examples:
+                pix:
+                  $ref: '#/components/examples/PagamentoPixPendente'
+                boleto:
+                  $ref: '#/components/examples/PagamentoBoletoPendente'
+                cartaoParcelado:
+                  $ref: '#/components/examples/PagamentoCartaoAutorizado'
+        '200':
+          description: |
+            Repetição de uma chave de idempotência já usada com o mesmo corpo. Devolve o pagamento
+            criado na primeira chamada; nada novo foi cobrado.
+          headers:
+            X-Correlation-Id:
+              $ref: '#/components/headers/CorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Pagamento'
+              examples:
+                repeticao:
+                  $ref: '#/components/examples/PagamentoPixPendente'
+        '400':
+          $ref: '#/components/responses/RequisicaoInvalida'
+        '401':
+          $ref: '#/components/responses/NaoAutenticado'
+        '403':
+          $ref: '#/components/responses/SemPermissao'
+        '409':
+          $ref: '#/components/responses/ChaveDeIdempotenciaEmConflito'
+        '422':
+          $ref: '#/components/responses/RegraDeNegocioViolada'
+        '500':
+          $ref: '#/components/responses/ErroInterno'
+        '503':
+          $ref: '#/components/responses/DependenciaIndisponivel'
+
+    get:
+      tags: [pagamentos]
+      operationId: listarPagamentos
+      summary: Lista pagamentos com filtro e paginação
+      description: |
+        Devolve uma página de pagamentos, mais recentes primeiro. Todos os filtros são opcionais e
+        se combinam por conjunção.
+
+        A listagem **não** traz a instrução de pagamento: instrução é dado de uma cobrança
+        específica, e carregá-la por item tornaria a página caríssima. Para ela, consulte o
+        pagamento por identificador.
+
+        Escopo exigido no token: `pagamentos:ler`.
+      parameters:
+        - $ref: '#/components/parameters/AcceptLanguage'
+        - $ref: '#/components/parameters/CorrelationId'
+        - name: ordemServicoId
+          in: query
+          description: Restringe à ordem de serviço informada.
+          required: false
+          schema:
+            type: string
+            format: uuid
+          example: 3fa85f64-5717-4562-b3fc-2c963f66afa6
+        - name: clienteId
+          in: query
+          description: Restringe ao cliente informado.
+          required: false
+          schema:
+            type: string
+            format: uuid
+        - name: situacao
+          in: query
+          description: Uma ou mais situações. Repetir o parâmetro soma valores.
+          required: false
+          schema:
+            type: array
+            items:
+              $ref: '#/components/schemas/SituacaoDoPagamento'
+          style: form
+          explode: true
+          example: [PENDENTE, AUTORIZADO]
+        - name: meio
+          in: query
+          description: Restringe ao meio de pagamento.
+          required: false
+          schema:
+            $ref: '#/components/schemas/MeioDePagamento'
+        - name: criadoDe
+          in: query
+          description: Limite inferior de `criadoEm`, inclusivo.
+          required: false
+          schema:
+            type: string
+            format: date-time
+          example: '2026-10-01T00:00:00Z'
+        - name: criadoAte
+          in: query
+          description: Limite superior de `criadoEm`, exclusivo.
+          required: false
+          schema:
+            type: string
+            format: date-time
+          example: '2026-11-01T00:00:00Z'
+        - name: pagina
+          in: query
+          description: Número da página, começando em zero.
+          required: false
+          schema:
+            type: integer
+            format: int32
+            minimum: 0
+            default: 0
+        - name: tamanho
+          in: query
+          description: Itens por página.
+          required: false
+          schema:
+            type: integer
+            format: int32
+            minimum: 1
+            maximum: 100
+            default: 20
+      responses:
+        '200':
+          description: Página de pagamentos. Página vazia é resposta válida, não erro.
+          headers:
+            X-Correlation-Id:
+              $ref: '#/components/headers/CorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaginaDePagamentos'
+              examples:
+                primeiraPagina:
+                  $ref: '#/components/examples/PaginaComDoisPagamentos'
+                vazia:
+                  $ref: '#/components/examples/PaginaVazia'
+        '400':
+          $ref: '#/components/responses/RequisicaoInvalida'
+        '401':
+          $ref: '#/components/responses/NaoAutenticado'
+        '403':
+          $ref: '#/components/responses/SemPermissao'
+        '500':
+          $ref: '#/components/responses/ErroInterno'
+
+  /v1/pagamentos/{pagamentoId}:
+
+    get:
+      tags: [pagamentos]
+      operationId: consultarPagamento
+      summary: Consulta um pagamento por identificador
+      description: |
+        Devolve o pagamento com as parcelas e, quando a cobrança ainda é pagável, a instrução de
+        pagamento. Cobrança já paga, expirada ou cancelada vem sem instrução — não há mais o que
+        apresentar a quem paga.
+
+        Esta é a leitura cacheada do serviço: a resposta vive em Redis por tempo curto. Redis fora
+        do ar não altera o resultado, só o custo — ver `docs/cache.md`.
+
+        Escopo exigido no token: `pagamentos:ler`.
+      parameters:
+        - $ref: '#/components/parameters/PagamentoId'
+        - $ref: '#/components/parameters/AcceptLanguage'
+        - $ref: '#/components/parameters/CorrelationId'
+      responses:
+        '200':
+          description: Pagamento encontrado.
+          headers:
+            X-Correlation-Id:
+              $ref: '#/components/headers/CorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Pagamento'
+              examples:
+                pixPendente:
+                  $ref: '#/components/examples/PagamentoPixPendente'
+                pixPago:
+                  $ref: '#/components/examples/PagamentoPixPago'
+                cartaoRecusado:
+                  $ref: '#/components/examples/PagamentoCartaoRecusado'
+        '400':
+          $ref: '#/components/responses/ParametroInvalido'
+        '401':
+          $ref: '#/components/responses/NaoAutenticado'
+        '403':
+          $ref: '#/components/responses/SemPermissao'
+        '404':
+          $ref: '#/components/responses/NaoEncontrado'
+        '500':
+          $ref: '#/components/responses/ErroInterno'
+
+components:
+
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        `Authorization: Bearer <jwt>`. O token é emitido por quem autentica, e este serviço valida
+        assinatura e emissor. Os escopos `pagamentos:ler` e `pagamentos:escrever` são exigidos por
+        operação — escopo ausente responde `403`, token ausente ou inválido responde `401`.
+
+  parameters:
+
+    PagamentoId:
+      name: pagamentoId
+      in: path
+      required: true
+      description: Identificador do pagamento.
+      schema:
+        type: string
+        format: uuid
+      example: 9f1c2d64-0b3e-4a51-9c77-1d2e3f4a5b6c
+
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: |
+        Chave que identifica a **intenção** de cobrança, não a tentativa de envio. Gerada por quem
+        chama, única por pedido, estável entre retentativas. Reutilizar a chave com corpo diferente
+        responde `409`.
+      schema:
+        type: string
+        minLength: 8
+        maxLength: 80
+      example: ordem-3fa85f64-cobranca-01
+
+    AcceptLanguage:
+      name: Accept-Language
+      in: header
+      required: false
+      description: Idioma das mensagens e descrições. Valor não suportado cai em `pt-BR`.
+      schema:
+        type: string
+        enum: [pt-BR, en, es]
+        default: pt-BR
+
+    CorrelationId:
+      name: X-Correlation-Id
+      in: header
+      required: false
+      description: |
+        Correlação de negócio, propagada por toda a cadeia e repetida na resposta e em todo log.
+        Ausente, o serviço gera uma.
+      schema:
+        type: string
+        maxLength: 64
+      example: 7b9a1f2e-5c3d-4e8a-9b1c-2d3e4f5a6b7c
+
+    RequestId:
+      name: X-Request-Id
+      in: header
+      required: false
+      description: Identificador desta requisição específica. Ausente, o serviço gera um.
+      schema:
+        type: string
+        maxLength: 64
+
+  headers:
+
+    CorrelationId:
+      description: Eco do `X-Correlation-Id` recebido, ou o valor gerado pelo serviço.
+      schema:
+        type: string
+      example: 7b9a1f2e-5c3d-4e8a-9b1c-2d3e4f5a6b7c
+
+    RequestId:
+      description: Eco do `X-Request-Id` recebido, ou o valor gerado pelo serviço.
+      schema:
+        type: string
+
+  schemas:
+
+    MeioDePagamento:
+      type: string
+      description: |
+        Meio de pagamento. `PIX` e `BOLETO` são sempre à vista; `CARTAO_CREDITO` aceita
+        parcelamento; `CARTAO_DEBITO` é à vista e autorizado na hora.
+      enum: [PIX, BOLETO, CARTAO_CREDITO, CARTAO_DEBITO]
+      example: PIX
+
+    SituacaoDoPagamento:
+      type: string
+      description: |
+        Situação da cobrança.
+
+        | Situação | Significado |
+        |---|---|
+        | `PENDENTE` | criada no provedor, aguardando o pagador |
+        | `AUTORIZADO` | cartão autorizado, valor ainda não capturado |
+        | `PAGO` | valor confirmado pelo provedor |
+        | `RECUSADO` | provedor recusou; `motivoRecusa` explica |
+        | `EXPIRADO` | prazo de pagamento vencido sem confirmação |
+        | `CANCELADO` | cancelada antes da confirmação |
+        | `ESTORNADO_PARCIAL` | parte do valor devolvida |
+        | `ESTORNADO_TOTAL` | valor integral devolvido |
+      enum:
+        - PENDENTE
+        - AUTORIZADO
+        - PAGO
+        - RECUSADO
+        - EXPIRADO
+        - CANCELADO
+        - ESTORNADO_PARCIAL
+        - ESTORNADO_TOTAL
+      example: PENDENTE
+
+    SituacaoDaParcela:
+      type: string
+      description: Situação de uma parcela. `VENCIDA` é parcela não paga depois do vencimento.
+      enum: [PENDENTE, PAGA, VENCIDA, CANCELADA]
+      example: PENDENTE
+
+    TipoDeDocumento:
+      type: string
+      description: Tipo do documento do pagador. `CPF` tem 11 dígitos, `CNPJ` tem 14.
+      enum: [CPF, CNPJ]
+      example: CPF
+
+    Valor:
+      type: object
+      description: Quantia monetária com a moeda explícita.
+      required: [quantia]
+      properties:
+        quantia:
+          type: string
+          format: decimal
+          description: |
+            Quantia com duas casas decimais, como texto para não perder precisão em trânsito.
+            Precisa ser maior que zero.
+          pattern: '^\d{1,13}(\.\d{1,2})?$'
+          example: '150.00'
+        moeda:
+          type: string
+          description: Moeda no padrão ISO 4217, três letras maiúsculas.
+          pattern: '^[A-Z]{3}$'
+          default: BRL
+          example: BRL
+
+    Documento:
+      type: object
+      description: |
+        Documento do pagador. O número aceita máscara, e a validação confere dígito verificador
+        **e** a coerência com o tipo informado: CPF com 14 dígitos é recusado.
+      required: [tipo, numero]
+      properties:
+        tipo:
+          $ref: '#/components/schemas/TipoDeDocumento'
+        numero:
+          type: string
+          description: Número com ou sem máscara.
+          example: 529.982.247-25
+
+    Contato:
+      type: object
+      description: |
+        Contato do pagador, opcional. Quando informado, o provedor usa para enviar o boleto ou o
+        comprovante — ausência não impede a cobrança.
+      properties:
+        email:
+          type: string
+          format: email
+          maxLength: 180
+          example: ana@exemplo.com
+        telefone:
+          type: string
+          pattern: '^\+?[0-9 ()-]{10,20}$'
+          example: '+55 11 99999-0000'
+
+    Pagador:
+      type: object
+      description: Quem paga. Nome e documento são obrigatórios; contato é opcional.
+      required: [nome, documento]
+      properties:
+        nome:
+          type: string
+          minLength: 3
+          maxLength: 120
+          example: Ana Souza
+        documento:
+          $ref: '#/components/schemas/Documento'
+        contato:
+          $ref: '#/components/schemas/Contato'
+
+    Cartao:
+      type: object
+      description: |
+        Dados do cartão, exigidos para `CARTAO_CREDITO` e `CARTAO_DEBITO` e proibidos nos demais
+        meios.
+
+        **Todo campo aqui é `writeOnly`: nenhuma resposta da API devolve qualquer um deles.** O
+        código de segurança não é persistido; o número é descartado após a autorização e aparece
+        apenas mascarado nos registros.
+      required: [numero, nomeDoPortador, validadeMes, validadeAno, codigoDeSeguranca]
+      properties:
+        numero:
+          type: string
+          writeOnly: true
+          description: Número do cartão, somente dígitos, 13 a 19 posições.
+          pattern: '^[0-9]{13,19}$'
+          example: '5031433215406351'
+        nomeDoPortador:
+          type: string
+          writeOnly: true
+          description: Nome impresso no cartão.
+          minLength: 3
+          maxLength: 120
+          example: ANA SOUZA
+        validadeMes:
+          type: integer
+          format: int32
+          writeOnly: true
+          description: Mês de validade, de 1 a 12.
+          minimum: 1
+          maximum: 12
+          example: 11
+        validadeAno:
+          type: integer
+          format: int32
+          writeOnly: true
+          description: Ano de validade com quatro dígitos.
+          minimum: 2026
+          maximum: 2099
+          example: 2030
+        codigoDeSeguranca:
+          type: string
+          writeOnly: true
+          description: CVV ou CVC, 3 ou 4 dígitos. Nunca persistido.
+          pattern: '^[0-9]{3,4}$'
+          example: '123'
+
+    SolicitarCobranca:
+      type: object
+      description: |
+        Pedido de cobrança. Três regras cruzam campos e são verificadas antes de qualquer chamada
+        ao provedor:
+
+        1. `parcelas > 1` exige `meio = CARTAO_CREDITO`;
+        2. `CARTAO_CREDITO` e `CARTAO_DEBITO` exigem `cartao`;
+        3. `PIX` e `BOLETO` recusam `cartao`.
+
+        As três são restrições declarativas de classe, então a violação responde `400` com a
+        lista `violacoes` — mesmo tratamento de qualquer outro campo recusado. O `422` fica
+        reservado para regra que depende de estado, como ordem de serviço já cobrada.
+      required: [ordemServicoId, clienteId, meio, valor, pagador]
+      properties:
+        ordemServicoId:
+          type: string
+          format: uuid
+          description: Ordem de serviço que está sendo cobrada.
+          example: 3fa85f64-5717-4562-b3fc-2c963f66afa6
+        clienteId:
+          type: string
+          format: uuid
+          description: Cliente dono da ordem de serviço.
+          example: 8c4e1b22-7f3a-4d19-b6e5-0a1b2c3d4e5f
+        meio:
+          $ref: '#/components/schemas/MeioDePagamento'
+        valor:
+          $ref: '#/components/schemas/Valor'
+        pagador:
+          $ref: '#/components/schemas/Pagador'
+        parcelas:
+          type: integer
+          format: int32
+          description: Número de parcelas. Acima de uma exige cartão de crédito.
+          minimum: 1
+          maximum: 24
+          default: 1
+          example: 1
+        cartao:
+          $ref: '#/components/schemas/Cartao'
+
+    Parcela:
+      type: object
+      description: Parcela da cobrança. Pix e boleto geram sempre uma única parcela.
+      required: [numero, valor, situacao]
+      properties:
+        numero:
+          type: integer
+          format: int32
+          description: Número sequencial, começando em 1.
+          minimum: 1
+          example: 1
+        valor:
+          $ref: '#/components/schemas/Valor'
+        situacao:
+          $ref: '#/components/schemas/SituacaoDaParcela'
+        vencimento:
+          type: string
+          format: date
+          nullable: true
+          description: Vencimento da parcela. Nulo quando o meio não tem vencimento, como o Pix.
+          example: '2026-11-15'
+
+    InstrucaoDePagamento:
+      type: object
+      description: |
+        O que o pagador precisa para pagar. O formato depende do meio, e o campo `meio` é o
+        discriminador: cada variante expõe só os campos do seu meio.
+      required: [meio]
+      properties:
+        meio:
+          $ref: '#/components/schemas/MeioDePagamento'
+      discriminator:
+        propertyName: meio
+        mapping:
+          PIX: '#/components/schemas/InstrucaoPix'
+          BOLETO: '#/components/schemas/InstrucaoBoleto'
+          CARTAO_CREDITO: '#/components/schemas/InstrucaoCartao'
+          CARTAO_DEBITO: '#/components/schemas/InstrucaoCartao'
+      oneOf:
+        - $ref: '#/components/schemas/InstrucaoPix'
+        - $ref: '#/components/schemas/InstrucaoBoleto'
+        - $ref: '#/components/schemas/InstrucaoCartao'
+
+    InstrucaoPix:
+      description: Instrução de pagamento por Pix.
+      allOf:
+        - $ref: '#/components/schemas/InstrucaoDePagamento'
+        - type: object
+          required: [copiaECola, expiraEm]
+          properties:
+            copiaECola:
+              type: string
+              description: Código copia e cola, no padrão EMV do Banco Central.
+              example: 00020126580014br.gov.bcb.pix0136a1f3c2d4-5e6f-7890-abcd-ef1234567890520400005303986540515.005802BR5913OFICINA MODELO6009SAO PAULO62070503***6304B13F
+            qrCodeBase64:
+              type: string
+              nullable: true
+              description: |
+                Mesmo código como imagem PNG em base64, para exibição. Nulo quando o provedor não
+                devolve a imagem — o copia e cola sozinho já permite pagar.
+              example: iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8AAAwAB/0IDFQAAAABJRU5ErkJggg==
+            expiraEm:
+              type: string
+              format: date-time
+              description: Instante em que a cobrança expira e passa a `EXPIRADO`.
+              example: '2026-10-29T15:30:00Z'
+
+    InstrucaoBoleto:
+      description: Instrução de pagamento por boleto.
+      allOf:
+        - $ref: '#/components/schemas/InstrucaoDePagamento'
+        - type: object
+          required: [linhaDigitavel, vencimento]
+          properties:
+            linhaDigitavel:
+              type: string
+              description: Linha digitável de 47 posições, sem separadores.
+              pattern: '^[0-9]{47}$'
+              example: '34191790010104351004791020150008291070026000'
+            urlDoBoleto:
+              type: string
+              format: uri
+              nullable: true
+              description: Endereço do boleto em PDF, quando o provedor hospeda o documento.
+              example: https://www.mercadopago.com.br/payments/1234567890/ticket
+            vencimento:
+              type: string
+              format: date
+              description: Data de vencimento. Depois dela o boleto deixa de ser pagável.
+              example: '2026-11-05'
+
+    InstrucaoCartao:
+      description: |
+        Instrução de pagamento por cartão. Não há nada a apresentar ao pagador: a autorização já
+        aconteceu. Os campos servem para comprovação e conciliação.
+      allOf:
+        - $ref: '#/components/schemas/InstrucaoDePagamento'
+        - type: object
+          required: [parcelas]
+          properties:
+            codigoDeAutorizacao:
+              type: string
+              nullable: true
+              description: Código devolvido pelo provedor na autorização. Nulo quando recusado.
+              example: '000000'
+            bandeira:
+              type: string
+              nullable: true
+              description: Bandeira identificada pelo provedor.
+              example: master
+            parcelas:
+              type: integer
+              format: int32
+              description: Parcelas efetivamente contratadas.
+              minimum: 1
+              example: 12
+
+    Pagamento:
+      type: object
+      description: |
+        Cobrança de uma ordem de serviço. Nenhum campo de cartão aparece aqui, em nenhuma
+        circunstância.
+      required: [id, ordemServicoId, situacao, meio, valor, pagador, criadoEm]
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: Identificador do pagamento neste serviço.
+          example: 9f1c2d64-0b3e-4a51-9c77-1d2e3f4a5b6c
+        ordemServicoId:
+          type: string
+          format: uuid
+          example: 3fa85f64-5717-4562-b3fc-2c963f66afa6
+        situacao:
+          $ref: '#/components/schemas/SituacaoDoPagamento'
+        meio:
+          $ref: '#/components/schemas/MeioDePagamento'
+        valor:
+          $ref: '#/components/schemas/Valor'
+        pagador:
+          $ref: '#/components/schemas/Pagador'
+        parcelas:
+          type: array
+          description: Parcelas geradas. Sempre uma para Pix, boleto e débito.
+          items:
+            $ref: '#/components/schemas/Parcela'
+        instrucao:
+          allOf:
+            - $ref: '#/components/schemas/InstrucaoDePagamento'
+          nullable: true
+          description: |
+            Instrução de pagamento. Ausente quando a cobrança não é mais pagável — paga, expirada,
+            cancelada ou estornada.
+        criadoEm:
+          type: string
+          format: date-time
+          description: Instante da criação, em UTC.
+          example: '2026-10-29T14:30:00Z'
+
+    PaginaDePagamentos:
+      type: object
+      description: |
+        Página de resultados. `total` é a contagem completa do filtro, não da página — é o que
+        permite a quem chama saber se vale pedir a próxima.
+      required: [conteudo, pagina, tamanho, total, totalDePaginas]
+      properties:
+        conteudo:
+          type: array
+          description: Pagamentos da página, mais recentes primeiro, sem instrução de pagamento.
+          items:
+            $ref: '#/components/schemas/Pagamento'
+        pagina:
+          type: integer
+          format: int32
+          description: Número da página devolvida, começando em zero.
+          example: 0
+        tamanho:
+          type: integer
+          format: int32
+          description: Itens por página pedidos.
+          example: 20
+        total:
+          type: integer
+          format: int64
+          description: Total de pagamentos que satisfazem o filtro.
+          example: 2
+        totalDePaginas:
+          type: integer
+          format: int32
+          description: Total de páginas para o filtro e o tamanho pedidos.
+          example: 1
+
+    Violacao:
+      type: object
+      description: Um campo recusado pela validação.
+      required: [campo, mensagem]
+      properties:
+        campo:
+          type: string
+          description: Caminho do campo no corpo enviado, com pontos.
+          example: pagador.documento.numero
+        mensagem:
+          type: string
+          description: Motivo da recusa, no idioma do `Accept-Language`.
+          example: Número de documento inválido
+        recebido:
+          type: string
+          nullable: true
+          description: |
+            Valor recebido, para facilitar a correção. Omitido quando o campo é sensível — cartão
+            nunca aparece aqui.
+          example: 111.111.111-11
+
+    Problema:
+      type: object
+      description: |
+        Erro no formato RFC 9457. `type` identifica a classe do problema e é estável: pode ser
+        usado como chave de tratamento pelo cliente. `title` e `detail` são texto para humano e
+        mudam com o idioma.
+      required: [type, title, status, detail, ocorridoEm]
+      properties:
+        type:
+          type: string
+          format: uri
+          description: |
+            URI da classe do problema. Valores: `validacao`, `corpo-invalido`,
+            `parametro-invalido`, `nao-encontrado`, `conflito`, `regra-de-negocio`,
+            `metodo-nao-suportado`, `dependencia-saturada`, `dependencia-indisponivel`, `interno`,
+            todos sob `https://payment-service/erros/`.
+          example: https://payment-service/erros/validacao
+        title:
+          type: string
+          description: Resumo da classe do problema.
+          example: Requisição inválida
+        status:
+          type: integer
+          format: int32
+          description: O mesmo código HTTP da resposta.
+          example: 400
+        detail:
+          type: string
+          description: Descrição desta ocorrência.
+          example: A requisição tem 1 campo(s) inválido(s)
+        instance:
+          type: string
+          nullable: true
+          description: Caminho que produziu o erro.
+          example: /v1/pagamentos
+        ocorridoEm:
+          type: string
+          format: date-time
+          description: Instante do erro, em UTC.
+          example: '2026-10-29T14:30:00Z'
+        correlationId:
+          type: string
+          nullable: true
+          description: Correlação da requisição. É o que se leva para a investigação.
+          example: 7b9a1f2e-5c3d-4e8a-9b1c-2d3e4f5a6b7c
+        violacoes:
+          type: array
+          description: Campos recusados. Vazia fora dos erros de validação.
+          items:
+            $ref: '#/components/schemas/Violacao'
+
+  responses:
+
+    RequisicaoInvalida:
+      description: Corpo malformado ou campo recusado pela validação.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problema'
+          examples:
+            validacao:
+              $ref: '#/components/examples/ProblemaDeValidacao'
+            corpoInvalido:
+              $ref: '#/components/examples/ProblemaDeCorpoInvalido'
+            parcelamentoIncoerente:
+              $ref: '#/components/examples/ProblemaDeParcelamentoIncoerente'
+            cartaoAusente:
+              $ref: '#/components/examples/ProblemaDeCartaoAusente'
+
+    ParametroInvalido:
+      description: Parâmetro de caminho ou de consulta com valor inaceitável.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problema'
+          examples:
+            parametroInvalido:
+              $ref: '#/components/examples/ProblemaDeParametroInvalido'
+
+    NaoAutenticado:
+      description: Token ausente, expirado, com assinatura inválida ou emissor desconhecido.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problema'
+          examples:
+            semToken:
+              $ref: '#/components/examples/ProblemaNaoAutenticado'
+
+    SemPermissao:
+      description: Token válido, sem o escopo exigido pela operação.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problema'
+          examples:
+            semEscopo:
+              $ref: '#/components/examples/ProblemaSemPermissao'
+
+    NaoEncontrado:
+      description: Não existe pagamento com o identificador informado.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problema'
+          examples:
+            naoEncontrado:
+              $ref: '#/components/examples/ProblemaNaoEncontrado'
+
+    ChaveDeIdempotenciaEmConflito:
+      description: |
+        A chave de idempotência já responde por outro pedido. Corpo diferente com a mesma chave é
+        erro de quem chama, não retentativa.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problema'
+          examples:
+            conflito:
+              $ref: '#/components/examples/ProblemaDeConflito'
+
+    RegraDeNegocioViolada:
+      description: |
+        Corpo e campos válidos, regra de estado recusada: a ordem de serviço já tem cobrança ativa,
+        ou o valor pedido não corresponde ao que a ordem deve. Diferente de `400`, aqui nada no
+        corpo está errado — o problema é o momento.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problema'
+          examples:
+            ordemJaCobrada:
+              $ref: '#/components/examples/ProblemaDeRegraDeNegocio'
+
+    DependenciaIndisponivel:
+      description: |
+        O provedor de pagamento está saturado ou com as chamadas suspensas por falhas
+        consecutivas. Nenhuma cobrança foi criada — é seguro repetir a requisição com a **mesma**
+        chave de idempotência.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problema'
+          examples:
+            circuitoAberto:
+              $ref: '#/components/examples/ProblemaDeDependenciaIndisponivel'
+
+    ErroInterno:
+      description: Falha não prevista. O `correlationId` localiza a ocorrência no log.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problema'
+          examples:
+            interno:
+              $ref: '#/components/examples/ProblemaInterno'
+
+  examples:
+
+    SolicitacaoPix:
+      summary: Pix à vista
+      description: Cobrança de R$ 150,00 por Pix, pagador pessoa física.
+      value:
+        ordemServicoId: 3fa85f64-5717-4562-b3fc-2c963f66afa6
+        clienteId: 8c4e1b22-7f3a-4d19-b6e5-0a1b2c3d4e5f
+        meio: PIX
+        valor:
+          quantia: '150.00'
+          moeda: BRL
+        pagador:
+          nome: Ana Souza
+          documento:
+            tipo: CPF
+            numero: 529.982.247-25
+          contato:
+            email: ana@exemplo.com
+            telefone: '+55 11 99999-0000'
+        parcelas: 1
+
+    SolicitacaoBoleto:
+      summary: Boleto para pessoa jurídica
+      description: Cobrança de R$ 2.480,00 por boleto, sem contato informado.
+      value:
+        ordemServicoId: b2c3d4e5-f6a7-4b8c-9d0e-1f2a3b4c5d6e
+        clienteId: 4d5e6f7a-8b9c-4d0e-8f1a-2b3c4d5e6f7a
+        meio: BOLETO
+        valor:
+          quantia: '2480.00'
+          moeda: BRL
+        pagador:
+          nome: Oficina Modelo Ltda
+          documento:
+            tipo: CNPJ
+            numero: 11.222.333/0001-81
+        parcelas: 1
+
+    SolicitacaoCartaoParcelado:
+      summary: Cartão de crédito em 12 parcelas
+      description: |
+        Cobrança de R$ 3.600,00 em 12 parcelas. O número usado é um cartão de teste do sandbox do
+        Mercado Pago. Os campos de `cartao` são `writeOnly` e não voltam em nenhuma resposta.
+      value:
+        ordemServicoId: c3d4e5f6-a7b8-4c9d-8e0f-1a2b3c4d5e6f
+        clienteId: 8c4e1b22-7f3a-4d19-b6e5-0a1b2c3d4e5f
+        meio: CARTAO_CREDITO
+        valor:
+          quantia: '3600.00'
+          moeda: BRL
+        pagador:
+          nome: Ana Souza
+          documento:
+            tipo: CPF
+            numero: 529.982.247-25
+          contato:
+            email: ana@exemplo.com
+        parcelas: 12
+        cartao:
+          numero: '5031433215406351'
+          nomeDoPortador: ANA SOUZA
+          validadeMes: 11
+          validadeAno: 2030
+          codigoDeSeguranca: '123'
+
+    PagamentoPixPendente:
+      summary: Pix criado, aguardando o pagador
+      value:
+        id: 9f1c2d64-0b3e-4a51-9c77-1d2e3f4a5b6c
+        ordemServicoId: 3fa85f64-5717-4562-b3fc-2c963f66afa6
+        situacao: PENDENTE
+        meio: PIX
+        valor:
+          quantia: '150.00'
+          moeda: BRL
+        pagador:
+          nome: Ana Souza
+          documento:
+            tipo: CPF
+            numero: 529.982.247-25
+          contato:
+            email: ana@exemplo.com
+            telefone: '+55 11 99999-0000'
+        parcelas:
+          - numero: 1
+            valor:
+              quantia: '150.00'
+              moeda: BRL
+            situacao: PENDENTE
+            vencimento: null
+        instrucao:
+          meio: PIX
+          copiaECola: 00020126580014br.gov.bcb.pix0136a1f3c2d4-5e6f-7890-abcd-ef1234567890520400005303986540515.005802BR5913OFICINA MODELO6009SAO PAULO62070503***6304B13F
+          qrCodeBase64: iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8AAAwAB/0IDFQAAAABJRU5ErkJggg==
+          expiraEm: '2026-10-29T15:30:00Z'
+        criadoEm: '2026-10-29T14:30:00Z'
+
+    PagamentoPixPago:
+      summary: Pix confirmado pelo provedor
+      description: Cobrança paga. Sem instrução — não há mais nada a apresentar a quem paga.
+      value:
+        id: 9f1c2d64-0b3e-4a51-9c77-1d2e3f4a5b6c
+        ordemServicoId: 3fa85f64-5717-4562-b3fc-2c963f66afa6
+        situacao: PAGO
+        meio: PIX
+        valor:
+          quantia: '150.00'
+          moeda: BRL
+        pagador:
+          nome: Ana Souza
+          documento:
+            tipo: CPF
+            numero: 529.982.247-25
+        parcelas:
+          - numero: 1
+            valor:
+              quantia: '150.00'
+              moeda: BRL
+            situacao: PAGA
+            vencimento: null
+        instrucao: null
+        criadoEm: '2026-10-29T14:30:00Z'
+
+    PagamentoBoletoPendente:
+      summary: Boleto emitido
+      value:
+        id: 1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d
+        ordemServicoId: b2c3d4e5-f6a7-4b8c-9d0e-1f2a3b4c5d6e
+        situacao: PENDENTE
+        meio: BOLETO
+        valor:
+          quantia: '2480.00'
+          moeda: BRL
+        pagador:
+          nome: Oficina Modelo Ltda
+          documento:
+            tipo: CNPJ
+            numero: 11.222.333/0001-81
+        parcelas:
+          - numero: 1
+            valor:
+              quantia: '2480.00'
+              moeda: BRL
+            situacao: PENDENTE
+            vencimento: '2026-11-05'
+        instrucao:
+          meio: BOLETO
+          linhaDigitavel: '34191790010104351004791020150008291070026000'
+          urlDoBoleto: https://www.mercadopago.com.br/payments/1234567890/ticket
+          vencimento: '2026-11-05'
+        criadoEm: '2026-10-29T14:31:00Z'
+
+    PagamentoCartaoAutorizado:
+      summary: Cartão autorizado em 12 parcelas
+      description: |
+        Autorização concedida na mesma requisição. As 12 parcelas nascem com vencimento mensal.
+        Nenhum dado do cartão aparece na resposta.
+      value:
+        id: 5d6e7f8a-9b0c-4d1e-8f2a-3b4c5d6e7f8a
+        ordemServicoId: c3d4e5f6-a7b8-4c9d-8e0f-1a2b3c4d5e6f
+        situacao: AUTORIZADO
+        meio: CARTAO_CREDITO
+        valor:
+          quantia: '3600.00'
+          moeda: BRL
+        pagador:
+          nome: Ana Souza
+          documento:
+            tipo: CPF
+            numero: 529.982.247-25
+          contato:
+            email: ana@exemplo.com
+        parcelas:
+          - numero: 1
+            valor:
+              quantia: '300.00'
+              moeda: BRL
+            situacao: PENDENTE
+            vencimento: '2026-11-29'
+          - numero: 2
+            valor:
+              quantia: '300.00'
+              moeda: BRL
+            situacao: PENDENTE
+            vencimento: '2026-12-29'
+        instrucao:
+          meio: CARTAO_CREDITO
+          codigoDeAutorizacao: '000000'
+          bandeira: master
+          parcelas: 12
+        criadoEm: '2026-10-29T14:32:00Z'
+
+    PagamentoCartaoRecusado:
+      summary: Cartão recusado pelo provedor
+      description: |
+        Recusa do provedor **não** é erro HTTP: a cobrança existe, foi registrada e a situação
+        conta o desfecho. O código de autorização vem nulo.
+      value:
+        id: 7f8a9b0c-1d2e-4f3a-8b4c-5d6e7f8a9b0c
+        ordemServicoId: c3d4e5f6-a7b8-4c9d-8e0f-1a2b3c4d5e6f
+        situacao: RECUSADO
+        meio: CARTAO_CREDITO
+        valor:
+          quantia: '3600.00'
+          moeda: BRL
+        pagador:
+          nome: Ana Souza
+          documento:
+            tipo: CPF
+            numero: 529.982.247-25
+        parcelas: []
+        instrucao:
+          meio: CARTAO_CREDITO
+          codigoDeAutorizacao: null
+          bandeira: master
+          parcelas: 12
+        criadoEm: '2026-10-29T14:33:00Z'
+
+    PaginaComDoisPagamentos:
+      summary: Primeira página com dois resultados
+      value:
+        conteudo:
+          - id: 5d6e7f8a-9b0c-4d1e-8f2a-3b4c5d6e7f8a
+            ordemServicoId: c3d4e5f6-a7b8-4c9d-8e0f-1a2b3c4d5e6f
+            situacao: AUTORIZADO
+            meio: CARTAO_CREDITO
+            valor:
+              quantia: '3600.00'
+              moeda: BRL
+            pagador:
+              nome: Ana Souza
+              documento:
+                tipo: CPF
+                numero: 529.982.247-25
+            parcelas: []
+            instrucao: null
+            criadoEm: '2026-10-29T14:32:00Z'
+          - id: 9f1c2d64-0b3e-4a51-9c77-1d2e3f4a5b6c
+            ordemServicoId: 3fa85f64-5717-4562-b3fc-2c963f66afa6
+            situacao: PENDENTE
+            meio: PIX
+            valor:
+              quantia: '150.00'
+              moeda: BRL
+            pagador:
+              nome: Ana Souza
+              documento:
+                tipo: CPF
+                numero: 529.982.247-25
+            parcelas: []
+            instrucao: null
+            criadoEm: '2026-10-29T14:30:00Z'
+        pagina: 0
+        tamanho: 20
+        total: 2
+        totalDePaginas: 1
+
+    PaginaVazia:
+      summary: Filtro sem resultado
+      description: Nenhum pagamento satisfaz o filtro. Página vazia é 200, nunca 404.
+      value:
+        conteudo: []
+        pagina: 0
+        tamanho: 20
+        total: 0
+        totalDePaginas: 0
+
+    ProblemaDeValidacao:
+      summary: Documento com dígito verificador inválido
+      value:
+        type: https://payment-service/erros/validacao
+        title: Requisição inválida
+        status: 400
+        detail: A requisição tem 1 campo(s) inválido(s)
+        instance: /v1/pagamentos
+        ocorridoEm: '2026-10-29T14:30:00Z'
+        correlationId: 7b9a1f2e-5c3d-4e8a-9b1c-2d3e4f5a6b7c
+        violacoes:
+          - campo: pagador.documento.numero
+            mensagem: Número de documento inválido
+            recebido: 111.111.111-11
+
+    ProblemaDeCorpoInvalido:
+      summary: JSON malformado
+      value:
+        type: https://payment-service/erros/corpo-invalido
+        title: Corpo da requisição inválido
+        status: 400
+        detail: O corpo enviado não pode ser interpretado
+        instance: /v1/pagamentos
+        ocorridoEm: '2026-10-29T14:30:00Z'
+        correlationId: 7b9a1f2e-5c3d-4e8a-9b1c-2d3e4f5a6b7c
+        violacoes: []
+
+    ProblemaDeParcelamentoIncoerente:
+      summary: Parcelamento fora do cartão de crédito
+      description: Regra que cruza `meio` e `parcelas`, verificada antes de qualquer chamada ao provedor.
+      value:
+        type: https://payment-service/erros/validacao
+        title: Requisição inválida
+        status: 400
+        detail: A requisição tem 1 campo(s) inválido(s)
+        instance: /v1/pagamentos
+        ocorridoEm: '2026-10-29T14:30:00Z'
+        correlationId: 7b9a1f2e-5c3d-4e8a-9b1c-2d3e4f5a6b7c
+        violacoes:
+          - campo: parcelas
+            mensagem: Parcelamento acima de uma parcela é permitido apenas para cartão de crédito
+            recebido: '12'
+
+    ProblemaDeCartaoAusente:
+      summary: Meio de cartão sem os dados do cartão
+      value:
+        type: https://payment-service/erros/validacao
+        title: Requisição inválida
+        status: 400
+        detail: A requisição tem 1 campo(s) inválido(s)
+        instance: /v1/pagamentos
+        ocorridoEm: '2026-10-29T14:30:00Z'
+        correlationId: 7b9a1f2e-5c3d-4e8a-9b1c-2d3e4f5a6b7c
+        violacoes:
+          - campo: cartao
+            mensagem: Os dados do cartão são obrigatórios para o meio escolhido
+
+    ProblemaDeParametroInvalido:
+      summary: Identificador que não é UUID
+      value:
+        type: https://payment-service/erros/parametro-invalido
+        title: Parâmetro inválido
+        status: 400
+        detail: O parâmetro 'pagamentoId' não aceita o valor enviado
+        instance: /v1/pagamentos/abc
+        ocorridoEm: '2026-10-29T14:30:00Z'
+        correlationId: 7b9a1f2e-5c3d-4e8a-9b1c-2d3e4f5a6b7c
+        violacoes: []
+
+    ProblemaNaoAutenticado:
+      summary: Token ausente
+      value:
+        type: https://payment-service/erros/nao-autenticado
+        title: Não autenticado
+        status: 401
+        detail: A requisição não apresentou um token válido
+        instance: /v1/pagamentos
+        ocorridoEm: '2026-10-29T14:30:00Z'
+        correlationId: 7b9a1f2e-5c3d-4e8a-9b1c-2d3e4f5a6b7c
+        violacoes: []
+
+    ProblemaSemPermissao:
+      summary: Escopo insuficiente
+      value:
+        type: https://payment-service/erros/sem-permissao
+        title: Sem permissão
+        status: 403
+        detail: O token não tem o escopo 'pagamentos:escrever'
+        instance: /v1/pagamentos
+        ocorridoEm: '2026-10-29T14:30:00Z'
+        correlationId: 7b9a1f2e-5c3d-4e8a-9b1c-2d3e4f5a6b7c
+        violacoes: []
+
+    ProblemaNaoEncontrado:
+      summary: Pagamento inexistente
+      value:
+        type: https://payment-service/erros/nao-encontrado
+        title: Recurso não encontrado
+        status: 404
+        detail: Pagamento com identificador '9f1c2d64-0b3e-4a51-9c77-1d2e3f4a5b6c' não existe
+        instance: /v1/pagamentos/9f1c2d64-0b3e-4a51-9c77-1d2e3f4a5b6c
+        ocorridoEm: '2026-10-29T14:30:00Z'
+        correlationId: 7b9a1f2e-5c3d-4e8a-9b1c-2d3e4f5a6b7c
+        violacoes: []
+
+    ProblemaDeConflito:
+      summary: Chave de idempotência reutilizada com outro corpo
+      value:
+        type: https://payment-service/erros/conflito
+        title: Conflito de estado
+        status: 409
+        detail: A chave de idempotência 'ordem-3fa85f64-cobranca-01' já responde por outro pedido
+        instance: /v1/pagamentos
+        ocorridoEm: '2026-10-29T14:30:00Z'
+        correlationId: 7b9a1f2e-5c3d-4e8a-9b1c-2d3e4f5a6b7c
+        violacoes: []
+
+    ProblemaDeRegraDeNegocio:
+      summary: Ordem de serviço com cobrança ativa
+      value:
+        type: https://payment-service/erros/regra-de-negocio
+        title: Regra de negócio violada
+        status: 422
+        detail: A ordem de serviço '3fa85f64-5717-4562-b3fc-2c963f66afa6' já tem uma cobrança pendente
+        instance: /v1/pagamentos
+        ocorridoEm: '2026-10-29T14:30:00Z'
+        correlationId: 7b9a1f2e-5c3d-4e8a-9b1c-2d3e4f5a6b7c
+        violacoes: []
+
+    ProblemaDeDependenciaIndisponivel:
+      summary: Circuito aberto para o provedor
+      value:
+        type: https://payment-service/erros/dependencia-indisponivel
+        title: Dependência indisponível
+        status: 503
+        detail: As chamadas para charge-create estão suspensas por falhas consecutivas
+        instance: /v1/pagamentos
+        ocorridoEm: '2026-10-29T14:30:00Z'
+        correlationId: 7b9a1f2e-5c3d-4e8a-9b1c-2d3e4f5a6b7c
+        violacoes: []
+
+    ProblemaInterno:
+      summary: Falha não prevista
+      value:
+        type: https://payment-service/erros/interno
+        title: Erro interno
+        status: 500
+        detail: A requisição não pôde ser concluída. Use o identificador de correlação para a investigação
+        instance: /v1/pagamentos
+        ocorridoEm: '2026-10-29T14:30:00Z'
+        correlationId: 7b9a1f2e-5c3d-4e8a-9b1c-2d3e4f5a6b7c
+        violacoes: []

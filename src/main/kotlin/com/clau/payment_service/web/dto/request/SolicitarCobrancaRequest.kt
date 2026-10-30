@@ -1,8 +1,11 @@
 package com.clau.payment_service.web.dto.request
 
 import com.clau.payment_service.model.enums.MeioDePagamento
+import com.clau.payment_service.web.dto.fragmento.CartaoDto
 import com.clau.payment_service.web.dto.fragmento.PagadorDto
 import com.clau.payment_service.web.dto.fragmento.ValorDto
+import com.clau.payment_service.web.validation.CartaoCoerente
+import com.clau.payment_service.web.validation.PagavelComCartao
 import com.clau.payment_service.web.validation.ParcelamentoCoerente
 import com.clau.payment_service.web.validation.Parcelavel
 import io.swagger.v3.oas.annotations.media.Schema
@@ -13,12 +16,17 @@ import jakarta.validation.constraints.NotNull
 import java.util.UUID
 
 @ParcelamentoCoerente
+@CartaoCoerente
 @Schema(name = "SolicitarCobranca", description = "{api.request.solicitar-cobranca}")
 data class SolicitarCobrancaRequest(
 
     @field:NotNull(message = "{validacao.campo.obrigatorio}")
     @field:Schema(description = "{api.request.ordem-servico-id}", example = "3fa85f64-5717-4562-b3fc-2c963f66afa6")
     val ordemServicoId: UUID?,
+
+    @field:NotNull(message = "{validacao.campo.obrigatorio}")
+    @field:Schema(description = "{api.request.cliente-id}", example = "8c4e1b22-7f3a-4d19-b6e5-0a1b2c3d4e5f")
+    val clienteId: UUID?,
 
     @field:NotNull(message = "{validacao.campo.obrigatorio}")
     @field:Schema(description = "{api.request.meio}", example = "PIX")
@@ -35,5 +43,9 @@ data class SolicitarCobrancaRequest(
     @field:Min(value = 1, message = "{validacao.parcelas.faixa}")
     @field:Max(value = 24, message = "{validacao.parcelas.faixa}")
     @field:Schema(description = "{api.request.parcelas}", example = "1", defaultValue = "1")
-    override val parcelas: Int = 1
-) : Parcelavel
+    override val parcelas: Int = 1,
+
+    @field:Valid
+    @field:Schema(description = "{api.request.cartao}")
+    override val cartao: CartaoDto? = null
+) : Parcelavel, PagavelComCartao

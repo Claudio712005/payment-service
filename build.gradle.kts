@@ -4,6 +4,7 @@ plugins {
     id("org.springframework.boot") version "4.1.1"
     id("io.spring.dependency-management") version "1.1.7"
     kotlin("plugin.jpa") version "2.3.21"
+    id("org.openapi.generator") version "7.14.0"
 }
 
 group = "com.clau"
@@ -66,4 +67,74 @@ allOpen {
 
 tasks.withType<Test> {
     useJUnitPlatform()
+}
+
+val contratoRest = layout.projectDirectory.file("apis/payment-service.openapi.yaml")
+val contratoGerado = layout.buildDirectory.dir("generated/openapi")
+
+val esquemasEscritosAMao = mapOf(
+    "SolicitarCobranca" to "com.clau.payment_service.web.dto.request.SolicitarCobrancaRequest",
+    "Pagamento" to "com.clau.payment_service.web.dto.response.PagamentoResponse",
+    "PaginaDePagamentos" to "com.clau.payment_service.web.dto.response.PaginaDePagamentosResponse",
+    "Parcela" to "com.clau.payment_service.web.dto.response.ParcelaResponse",
+    "InstrucaoDePagamento" to "com.clau.payment_service.web.dto.response.InstrucaoDePagamentoResponse",
+    "InstrucaoPix" to "com.clau.payment_service.web.dto.response.InstrucaoPixResponse",
+    "InstrucaoBoleto" to "com.clau.payment_service.web.dto.response.InstrucaoBoletoResponse",
+    "InstrucaoCartao" to "com.clau.payment_service.web.dto.response.InstrucaoCartaoResponse",
+    "Valor" to "com.clau.payment_service.web.dto.fragmento.ValorDto",
+    "Pagador" to "com.clau.payment_service.web.dto.fragmento.PagadorDto",
+    "Documento" to "com.clau.payment_service.web.dto.fragmento.DocumentoDto",
+    "Contato" to "com.clau.payment_service.web.dto.fragmento.ContatoDto",
+    "Cartao" to "com.clau.payment_service.web.dto.fragmento.CartaoDto",
+    "Problema" to "com.clau.payment_service.web.error.ProblemaResponse",
+    "Violacao" to "com.clau.payment_service.web.error.ProblemaResponse.ViolacaoResponse",
+    "MeioDePagamento" to "com.clau.payment_service.model.enums.MeioDePagamento",
+    "SituacaoDoPagamento" to "com.clau.payment_service.model.enums.SituacaoDoPagamento",
+    "SituacaoDaParcela" to "com.clau.payment_service.model.enums.SituacaoDaParcela",
+    "TipoDeDocumento" to "com.clau.payment_service.web.validation.TipoDeDocumento"
+)
+
+openApiValidate {
+    inputSpec = contratoRest.asFile.path
+    recommend = true
+}
+
+openApiGenerate {
+    generatorName = "kotlin-spring"
+    inputSpec = contratoRest.asFile.path
+    outputDir = contratoGerado.map { it.asFile.path }
+    apiPackage = "com.clau.payment_service.web.api"
+    modelPackage = "com.clau.payment_service.web.dto"
+    schemaMappings = esquemasEscritosAMao
+    importMappings = esquemasEscritosAMao
+    globalProperties = mapOf(
+        "apis" to "",
+        "models" to "false",
+        "supportingFiles" to "false"
+    )
+    configOptions = mapOf(
+        "useSpringBoot3" to "true",
+        "interfaceOnly" to "true",
+        "skipDefaultInterface" to "true",
+        "useTags" to "true",
+        "documentationProvider" to "none",
+        "annotationLibrary" to "none",
+        "serializationLibrary" to "jackson",
+        "useBeanValidation" to "true",
+        "enumPropertyNaming" to "UPPERCASE"
+    )
+}
+
+sourceSets {
+    main {
+        kotlin.srcDir(contratoGerado.map { it.dir("src/main/kotlin") })
+    }
+}
+
+tasks.named("compileKotlin") {
+    dependsOn(tasks.named("openApiGenerate"))
+}
+
+tasks.named("openApiGenerate") {
+    dependsOn(tasks.named("openApiValidate"))
 }

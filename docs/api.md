@@ -6,6 +6,10 @@ todo erro sai no mesmo formato.
 
 OpenAPI em `/v3/api-docs`, Swagger UI em `/swagger-ui.html`.
 
+**A fonte de verdade da API é `apis/payment-service.openapi.yaml`**, não estas anotações — ver
+[contratos.md](contratos.md). O que vive no código é o que o gerador não sabe produzir: descrição
+como chave de tradução e restrição que cruza campos.
+
 ## 1. Internacionalização
 
 Três idiomas: `pt-BR` (padrão), `en`, `es`. O idioma vem do cabeçalho `Accept-Language`;
