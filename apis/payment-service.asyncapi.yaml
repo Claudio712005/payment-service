@@ -1,0 +1,542 @@
+asyncapi: 3.0.0
+
+info:
+  title: Mensageria de pagamentos
+  version: 1.0.0
+  description: |
+    Contrato das mensagens que o payment-service **publica** e da que ele **consome**.
+
+    ## Propriedade do contrato é assimétrica
+
+    | Mensagem | Dono | Por quê |
+    |---|---|---|
+    | evento `pagamento.*` | este serviço | quem emite descreve o que aconteceu |
+    | comando `cobrar-pagamento` | o orquestrador | quem pede descreve o que quer |
+
+    Este arquivo guarda o original dos eventos e uma **cópia** do comando. A cópia só não divergir
+    do original é garantido por teste de contrato, não por ferramenta: o teste serializa o comando
+    deste lado e confere contra o esquema publicado por quem orquestra.
+
+    ## Entrega é ao menos uma vez
+
+    Todo consumidor é idempotente. O comando traz `idMensagem`, e a tabela `MENSAGENS_PROCESSADAS`
+    guarda o que já foi processado com unicidade na chave primária — mensagem repetida é
+    reconhecida e descartada, nunca cobrada duas vezes.
+
+    ## Publicação é pela outbox, não direto
+
+    Evento nenhum vai ao broker no caminho da requisição. A transição de situação e a linha em
+    `EVENTOS_SAIDA` são gravadas na **mesma transação** do banco relacional, e uma rotina publica
+    depois. Broker fora do ar atrasa o evento; não perde a cobrança e não desfaz o pagamento.
+
+    Consequência aceita: o evento é publicado fora do span que o originou, então o consumidor entra
+    num trace vizinho. O `traceparent` de origem é guardado na coluna `TRACEPARENT` da outbox e vai
+    no cabeçalho da mensagem para amarrar os dois lados.
+
+    ## Ordem
+
+    A chave da mensagem é o `pagamentoId`. Isso põe todos os eventos de uma mesma cobrança na mesma
+    partição, e a ordem entre eles é garantida. Entre cobranças diferentes não há ordem — e nenhum
+    consumidor deve depender disso.
+
+defaultContentType: application/json
+
+servers:
+  broker:
+    host: localhost:9092
+    protocol: kafka
+    description: |
+      Broker do ambiente. O endereço é lido de `KAFKA_BOOTSTRAP_SERVERS` e precisa ser alcançável
+      do pod — nome curto de outro namespace conecta e trava no metadata.
+
+channels:
+
+  pagamentoCriado:
+    address: payment.pagamento.criado.v1
+    title: Cobrança criada
+    description: Uma cobrança nasceu no provedor e está aguardando o pagador.
+    messages:
+      pagamentoCriado:
+        $ref: '#/components/messages/PagamentoCriado'
+
+  pagamentoAutorizado:
+    address: payment.pagamento.autorizado.v1
+    title: Cartão autorizado
+    description: |
+      O provedor autorizou o cartão. O valor **não** foi capturado ainda — quem consome não deve
+      tratar isto como dinheiro recebido.
+    messages:
+      pagamentoAutorizado:
+        $ref: '#/components/messages/PagamentoAutorizado'
+
+  pagamentoPago:
+    address: payment.pagamento.pago.v1
+    title: Cobrança paga
+    description: |
+      O provedor confirmou o valor. É este o evento que libera o que depende do pagamento — os
+      outros são informativos.
+    messages:
+      pagamentoPago:
+        $ref: '#/components/messages/PagamentoPago'
+
+  pagamentoRecusado:
+    address: payment.pagamento.recusado.v1
+    title: Cobrança recusada
+    description: O provedor recusou a cobrança. `motivo` traz o código normalizado da recusa.
+    messages:
+      pagamentoRecusado:
+        $ref: '#/components/messages/PagamentoRecusado'
+
+  pagamentoExpirado:
+    address: payment.pagamento.expirado.v1
+    title: Cobrança expirada
+    description: |
+      O prazo venceu sem confirmação. Pix e boleto chegam aqui pela rotina de expiração, não por
+      notificação do provedor — por isso o evento pode sair minutos depois do instante exato.
+    messages:
+      pagamentoExpirado:
+        $ref: '#/components/messages/PagamentoExpirado'
+
+  cobrarPagamento:
+    address: payment.comando.cobrar-pagamento.v1
+    title: Comando de cobrança
+    description: |
+      Pedido de cobrança vindo do orquestrador. **O contrato desta mensagem não pertence a este
+      serviço** — alterá-lo exige acordo com quem publica.
+    messages:
+      cobrarPagamento:
+        $ref: '#/components/messages/CobrarPagamento'
+
+operations:
+
+  publicarPagamentoCriado:
+    action: send
+    channel:
+      $ref: '#/channels/pagamentoCriado'
+
+  publicarPagamentoAutorizado:
+    action: send
+    channel:
+      $ref: '#/channels/pagamentoAutorizado'
+
+  publicarPagamentoPago:
+    action: send
+    channel:
+      $ref: '#/channels/pagamentoPago'
+
+  publicarPagamentoRecusado:
+    action: send
+    channel:
+      $ref: '#/channels/pagamentoRecusado'
+
+  publicarPagamentoExpirado:
+    action: send
+    channel:
+      $ref: '#/channels/pagamentoExpirado'
+
+  consumirCobrarPagamento:
+    action: receive
+    channel:
+      $ref: '#/channels/cobrarPagamento'
+    description: |
+      Consumo idempotente e retentável. `idMensagem` já visto é reconhecido e descartado;
+      `expiraEm` no passado é descartado com registro, porque o orquestrador já desistiu e cobrar
+      agora criaria dinheiro órfão.
+
+components:
+
+  messageTraits:
+    cabecalhoPadrao:
+      headers:
+        type: object
+        required: [traceparent, idMensagem, ocorridoEm]
+        properties:
+          traceparent:
+            type: string
+            description: |
+              Trace no formato W3C. **É o trace canônico**, não o campo `traceId` de corpo nenhum:
+              o cabeçalho é o que o consumidor usa para entrar no mesmo trace.
+            pattern: '^[0-9a-f]{2}-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}$'
+            examples:
+              - 00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01
+          idMensagem:
+            type: string
+            description: Identificador único da mensagem, usado para descartar repetição.
+            maxLength: 160
+            examples:
+              - 9f1c2d64-0b3e-4a51-9c77-1d2e3f4a5b6c:PAGO:1
+          ocorridoEm:
+            type: string
+            format: date-time
+            description: Instante do fato, em UTC. Não é o instante da publicação.
+            examples:
+              - '2026-10-29T14:35:12Z'
+
+  schemas:
+
+    MeioDePagamento:
+      type: string
+      enum: [PIX, BOLETO, CARTAO_CREDITO, CARTAO_DEBITO]
+
+    SituacaoDoPagamento:
+      type: string
+      enum:
+        - PENDENTE
+        - AUTORIZADO
+        - PAGO
+        - RECUSADO
+        - EXPIRADO
+        - CANCELADO
+        - ESTORNADO_PARCIAL
+        - ESTORNADO_TOTAL
+
+    Valor:
+      type: object
+      description: Quantia com a moeda explícita. Texto para não perder precisão em trânsito.
+      required: [quantia, moeda]
+      properties:
+        quantia:
+          type: string
+          pattern: '^\d{1,13}(\.\d{1,2})?$'
+          examples: ['150.00']
+        moeda:
+          type: string
+          pattern: '^[A-Z]{3}$'
+          examples: [BRL]
+
+    EnvelopeDoEvento:
+      type: object
+      description: |
+        O que todo evento de pagamento carrega. Evolução é **aditiva**: campo novo é opcional,
+        campo existente nunca muda de tipo nem de significado. Quebra de evento não dá erro HTTP —
+        dá silêncio e dado errado.
+      required: [pagamentoId, ordemServicoId, clienteId, situacao, meio, valor, ocorridoEm]
+      properties:
+        pagamentoId:
+          type: string
+          format: uuid
+          description: Identificador do pagamento. É também a chave da mensagem.
+          examples: [9f1c2d64-0b3e-4a51-9c77-1d2e3f4a5b6c]
+        ordemServicoId:
+          type: string
+          format: uuid
+          examples: [3fa85f64-5717-4562-b3fc-2c963f66afa6]
+        clienteId:
+          type: string
+          format: uuid
+          examples: [8c4e1b22-7f3a-4d19-b6e5-0a1b2c3d4e5f]
+        situacao:
+          $ref: '#/components/schemas/SituacaoDoPagamento'
+        situacaoAnterior:
+          type: string
+          description: Situação de onde o pagamento veio. Ausente no primeiro evento da cobrança.
+          examples: [PENDENTE]
+        meio:
+          $ref: '#/components/schemas/MeioDePagamento'
+        valor:
+          $ref: '#/components/schemas/Valor'
+        ocorridoEm:
+          type: string
+          format: date-time
+          description: Instante da transição, em UTC. Repetido no cabeçalho por conveniência.
+          examples: ['2026-10-29T14:35:12Z']
+
+  messages:
+
+    PagamentoCriado:
+      name: PagamentoCriado
+      title: Cobrança criada
+      summary: Cobrança registrada no provedor, aguardando o pagador.
+      contentType: application/json
+      traits:
+        - $ref: '#/components/messageTraits/cabecalhoPadrao'
+      payload:
+        allOf:
+          - $ref: '#/components/schemas/EnvelopeDoEvento'
+          - type: object
+            properties:
+              parcelas:
+                type: integer
+                description: Parcelas contratadas.
+                examples: [1]
+              expiraEm:
+                type: string
+                format: date-time
+                description: Prazo para pagar. Ausente quando o meio não expira.
+                examples: ['2026-10-29T15:30:00Z']
+      examples:
+        - name: pixCriado
+          summary: Pix de R$ 150,00 criado
+          headers:
+            traceparent: 00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01
+            idMensagem: 9f1c2d64-0b3e-4a51-9c77-1d2e3f4a5b6c:CRIADO:1
+            ocorridoEm: '2026-10-29T14:30:00Z'
+          payload:
+            pagamentoId: 9f1c2d64-0b3e-4a51-9c77-1d2e3f4a5b6c
+            ordemServicoId: 3fa85f64-5717-4562-b3fc-2c963f66afa6
+            clienteId: 8c4e1b22-7f3a-4d19-b6e5-0a1b2c3d4e5f
+            situacao: PENDENTE
+            meio: PIX
+            valor:
+              quantia: '150.00'
+              moeda: BRL
+            parcelas: 1
+            expiraEm: '2026-10-29T15:30:00Z'
+            ocorridoEm: '2026-10-29T14:30:00Z'
+
+    PagamentoAutorizado:
+      name: PagamentoAutorizado
+      title: Cartão autorizado
+      summary: Autorização concedida; valor ainda não capturado.
+      contentType: application/json
+      traits:
+        - $ref: '#/components/messageTraits/cabecalhoPadrao'
+      payload:
+        allOf:
+          - $ref: '#/components/schemas/EnvelopeDoEvento'
+          - type: object
+            properties:
+              codigoDeAutorizacao:
+                type: string
+                examples: ['000000']
+              bandeira:
+                type: string
+                examples: [master]
+      examples:
+        - name: cartaoAutorizado
+          summary: Cartão autorizado em 12 parcelas
+          headers:
+            traceparent: 00-4bf92f3577b34da6a3ce929d0e0e4736-1a2b3c4d5e6f7a8b-01
+            idMensagem: 5d6e7f8a-9b0c-4d1e-8f2a-3b4c5d6e7f8a:AUTORIZADO:1
+            ocorridoEm: '2026-10-29T14:32:05Z'
+          payload:
+            pagamentoId: 5d6e7f8a-9b0c-4d1e-8f2a-3b4c5d6e7f8a
+            ordemServicoId: c3d4e5f6-a7b8-4c9d-8e0f-1a2b3c4d5e6f
+            clienteId: 8c4e1b22-7f3a-4d19-b6e5-0a1b2c3d4e5f
+            situacao: AUTORIZADO
+            situacaoAnterior: PENDENTE
+            meio: CARTAO_CREDITO
+            valor:
+              quantia: '3600.00'
+              moeda: BRL
+            codigoDeAutorizacao: '000000'
+            bandeira: master
+            ocorridoEm: '2026-10-29T14:32:05Z'
+
+    PagamentoPago:
+      name: PagamentoPago
+      title: Cobrança paga
+      summary: Valor confirmado pelo provedor. É o evento que libera o que depende do pagamento.
+      contentType: application/json
+      traits:
+        - $ref: '#/components/messageTraits/cabecalhoPadrao'
+      payload:
+        allOf:
+          - $ref: '#/components/schemas/EnvelopeDoEvento'
+          - type: object
+            required: [valorPago, confirmadoEm]
+            properties:
+              valorPago:
+                $ref: '#/components/schemas/Valor'
+              confirmadoEm:
+                type: string
+                format: date-time
+                description: Instante em que o provedor confirmou, como ele reporta.
+                examples: ['2026-10-29T14:35:12Z']
+      examples:
+        - name: pixPago
+          summary: Pix confirmado cinco minutos depois
+          headers:
+            traceparent: 00-4bf92f3577b34da6a3ce929d0e0e4736-9f8e7d6c5b4a3210-01
+            idMensagem: 9f1c2d64-0b3e-4a51-9c77-1d2e3f4a5b6c:PAGO:1
+            ocorridoEm: '2026-10-29T14:35:12Z'
+          payload:
+            pagamentoId: 9f1c2d64-0b3e-4a51-9c77-1d2e3f4a5b6c
+            ordemServicoId: 3fa85f64-5717-4562-b3fc-2c963f66afa6
+            clienteId: 8c4e1b22-7f3a-4d19-b6e5-0a1b2c3d4e5f
+            situacao: PAGO
+            situacaoAnterior: PENDENTE
+            meio: PIX
+            valor:
+              quantia: '150.00'
+              moeda: BRL
+            valorPago:
+              quantia: '150.00'
+              moeda: BRL
+            confirmadoEm: '2026-10-29T14:35:12Z'
+            ocorridoEm: '2026-10-29T14:35:12Z'
+
+    PagamentoRecusado:
+      name: PagamentoRecusado
+      title: Cobrança recusada
+      summary: Provedor recusou a cobrança.
+      contentType: application/json
+      traits:
+        - $ref: '#/components/messageTraits/cabecalhoPadrao'
+      payload:
+        allOf:
+          - $ref: '#/components/schemas/EnvelopeDoEvento'
+          - type: object
+            required: [motivo]
+            properties:
+              motivo:
+                type: string
+                description: |
+                  Código normalizado da recusa, não o código cru do provedor. Quem consome trata
+                  este catálogo, que não muda quando o provedor muda.
+                enum:
+                  - SALDO_INSUFICIENTE
+                  - CARTAO_EXPIRADO
+                  - CARTAO_BLOQUEADO
+                  - DADOS_INVALIDOS
+                  - SUSPEITA_DE_FRAUDE
+                  - RECUSA_DO_EMISSOR
+                examples: [SALDO_INSUFICIENTE]
+              detalhe:
+                type: string
+                description: Texto do provedor, para investigação. Não serve como chave de decisão.
+                examples: [insufficient_amount]
+      examples:
+        - name: saldoInsuficiente
+          summary: Recusa por saldo
+          headers:
+            traceparent: 00-4bf92f3577b34da6a3ce929d0e0e4736-abcdef0123456789-01
+            idMensagem: 7f8a9b0c-1d2e-4f3a-8b4c-5d6e7f8a9b0c:RECUSADO:1
+            ocorridoEm: '2026-10-29T14:33:02Z'
+          payload:
+            pagamentoId: 7f8a9b0c-1d2e-4f3a-8b4c-5d6e7f8a9b0c
+            ordemServicoId: c3d4e5f6-a7b8-4c9d-8e0f-1a2b3c4d5e6f
+            clienteId: 8c4e1b22-7f3a-4d19-b6e5-0a1b2c3d4e5f
+            situacao: RECUSADO
+            situacaoAnterior: PENDENTE
+            meio: CARTAO_CREDITO
+            valor:
+              quantia: '3600.00'
+              moeda: BRL
+            motivo: SALDO_INSUFICIENTE
+            detalhe: insufficient_amount
+            ocorridoEm: '2026-10-29T14:33:02Z'
+
+    PagamentoExpirado:
+      name: PagamentoExpirado
+      title: Cobrança expirada
+      summary: Prazo vencido sem confirmação.
+      contentType: application/json
+      traits:
+        - $ref: '#/components/messageTraits/cabecalhoPadrao'
+      payload:
+        allOf:
+          - $ref: '#/components/schemas/EnvelopeDoEvento'
+          - type: object
+            required: [expiraEm]
+            properties:
+              expiraEm:
+                type: string
+                format: date-time
+                description: |
+                  Prazo que venceu. `ocorridoEm` é posterior a ele: a expiração é detectada por
+                  rotina, não no instante exato.
+                examples: ['2026-10-29T15:30:00Z']
+      examples:
+        - name: pixExpirado
+          summary: Pix expirado, detectado pela rotina
+          headers:
+            traceparent: 00-1b2c3d4e5f60718293a4b5c6d7e8f901-0a1b2c3d4e5f6071-01
+            idMensagem: 9f1c2d64-0b3e-4a51-9c77-1d2e3f4a5b6c:EXPIRADO:1
+            ocorridoEm: '2026-10-29T15:31:00Z'
+          payload:
+            pagamentoId: 9f1c2d64-0b3e-4a51-9c77-1d2e3f4a5b6c
+            ordemServicoId: 3fa85f64-5717-4562-b3fc-2c963f66afa6
+            clienteId: 8c4e1b22-7f3a-4d19-b6e5-0a1b2c3d4e5f
+            situacao: EXPIRADO
+            situacaoAnterior: PENDENTE
+            meio: PIX
+            valor:
+              quantia: '150.00'
+              moeda: BRL
+            expiraEm: '2026-10-29T15:30:00Z'
+            ocorridoEm: '2026-10-29T15:31:00Z'
+
+    CobrarPagamento:
+      name: CobrarPagamento
+      title: Cobrar pagamento
+      summary: Comando do orquestrador pedindo a cobrança de uma ordem de serviço.
+      description: |
+        Cópia do contrato publicado pelo orquestrador. O campo `idMensagem` do cabeçalho é a chave
+        de idempotência do consumo, e `expiraEm` é o prazo **do orquestrador** — passado dele, o
+        comando é descartado com registro em vez de executado.
+      contentType: application/json
+      traits:
+        - $ref: '#/components/messageTraits/cabecalhoPadrao'
+      payload:
+        type: object
+        required: [ordemServicoId, clienteId, meio, valor, pagador, expiraEm]
+        properties:
+          ordemServicoId:
+            type: string
+            format: uuid
+            examples: [3fa85f64-5717-4562-b3fc-2c963f66afa6]
+          clienteId:
+            type: string
+            format: uuid
+            examples: [8c4e1b22-7f3a-4d19-b6e5-0a1b2c3d4e5f]
+          meio:
+            $ref: '#/components/schemas/MeioDePagamento'
+          valor:
+            $ref: '#/components/schemas/Valor'
+          parcelas:
+            type: integer
+            minimum: 1
+            maximum: 24
+            default: 1
+            examples: [1]
+          pagador:
+            type: object
+            required: [nome, documento]
+            properties:
+              nome:
+                type: string
+                examples: [Ana Souza]
+              documento:
+                type: object
+                required: [tipo, numero]
+                properties:
+                  tipo:
+                    type: string
+                    enum: [CPF, CNPJ]
+                  numero:
+                    type: string
+                    examples: ['52998224725']
+              email:
+                type: string
+                format: email
+                examples: [ana@exemplo.com]
+          expiraEm:
+            type: string
+            format: date-time
+            description: |
+              Prazo do orquestrador para este passo. O relógio é dele, não deste serviço — comando
+              vencido não é executado.
+            examples: ['2026-10-29T14:40:00Z']
+      examples:
+        - name: cobrarPix
+          summary: Orquestrador pede Pix de R$ 150,00
+          headers:
+            traceparent: 00-4bf92f3577b34da6a3ce929d0e0e4736-7a6b5c4d3e2f1a0b-01
+            idMensagem: 3fa85f64-5717-4562-b3fc-2c963f66afa6:COBRANCA:1
+            ocorridoEm: '2026-10-29T14:29:58Z'
+          payload:
+            ordemServicoId: 3fa85f64-5717-4562-b3fc-2c963f66afa6
+            clienteId: 8c4e1b22-7f3a-4d19-b6e5-0a1b2c3d4e5f
+            meio: PIX
+            valor:
+              quantia: '150.00'
+              moeda: BRL
+            parcelas: 1
+            pagador:
+              nome: Ana Souza
+              documento:
+                tipo: CPF
+                numero: '52998224725'
+              email: ana@exemplo.com
+            expiraEm: '2026-10-29T14:40:00Z'
